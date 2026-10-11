@@ -1,13 +1,16 @@
 {% extends "panels/base.html" %}
 {% block title %}{{ unit }}{% endblock %}
 {% block content %}
-<h1>{{ unit }}</h1>
-<div class="card"><p>کالا: <a href="{% url 'panels:item' unit.item_type_id %}">{{ unit.item_type.name }}</a> · وضعیت: <span class="badge badge-{{ unit.status }}">{{ unit.get_status_display }}</span>
-· {% if unit.installed_in %}نصب‌شده روی <a href="{% url 'panels:unit' unit.installed_in_id %}">{{ unit.installed_in }}</a>{% else %}محل: {{ unit.location|default:"—" }}{% endif %}</p></div>
+<div class="pagehead"><div><h1>{{ unit.item_type.name }} <span class="code">{{ unit.serial_number|default:unit.asset_code }}</span></h1>
+<p class="sub" style="margin:0">کالا: <a href="{% url 'panels:item' unit.item_type_id %}">{{ unit.item_type.name }}</a> · وضعیت: <span class="badge badge-{{ unit.status }}">{{ unit.get_status_display }}</span>
+· {% if unit.installed_in %}نصب‌شده روی <a href="{% url 'panels:unit' unit.installed_in_id %}">{{ unit.installed_in }}</a>{% else %}محل: {{ unit.location|default:"—" }}{% endif %}
+{% if unit.asset_code %} · کد داخلی: <span class="code">{{ unit.asset_code }}</span>{% endif %}</p></div></div>
 {% if unit.item_type.is_server %}
-<div class="card"><h2>قطعات فعلی نصب‌شده روی این سرور</h2>
-{% if components %}<div class="tw"><table><tr><th>قطعه</th><th>تعداد</th><th>سریال‌ها</th></tr>
-{% for c in components %}<tr><td><a href="{% url 'panels:item' c.item.pk %}">{{ c.item.name }}</a></td><td class="num">{{ c.qty }}</td><td class="ltr">{{ c.serials|join:"، " }}</td></tr>{% endfor %}</table></div>
+<div class="card"><h2>سخت‌افزار این سرور {% if unit.status != "free" and unit.status != "out" %}<span class="muted" style="font-size:13px;font-weight:400">(همراه سرور، در وضعیت «{{ unit.get_status_display }}»)</span>{% endif %}</h2>
+{% if components %}<div class="tw"><table><tr><th>قطعه</th><th>تعداد</th><th>شناسه‌ها</th></tr>
+{% for c in components %}<tr><td><a href="{% url 'panels:item' c.item.pk %}">{{ c.item.name }}</a></td><td class="num">{{ c.qty }}</td>
+<td>{% for p in c.units %}<a class="badge code" href="{% url 'panels:unit' p.pk %}">{{ p.serial_number|default:p.asset_code }}</a> {% endfor %}{% if c.unidentified %}<span class="muted">+ {{ c.unidentified }} بدون شناسه (ثبت قدیمی)</span>{% endif %}</td></tr>{% endfor %}</table></div>
+<p class="hint">برای جدا کردن یا انتقال قطعه، از صفحهٔ همان کالا (روی نام قطعه کلیک کن) استفاده کن.</p>
 {% else %}<p class="muted">قطعه‌ای نصب نشده است.</p>{% endif %}</div>
 {% endif %}
 <div class="card"><h2>تاریخچه</h2><div class="tw"><table><tr><th>تاریخ</th><th>عملیات</th><th>سند</th><th>کالا</th><th>وضعیت</th><th>تغییر</th></tr>

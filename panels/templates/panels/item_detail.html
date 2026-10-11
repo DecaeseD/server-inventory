@@ -1,40 +1,86 @@
 {% extends "panels/base.html" %}
 {% block title %}{{ item.name }}{% endblock %}
 {% block content %}
-<h1>{{ item.name }} <span class="muted" style="font-size:14px">{{ item.brand }} {{ item.model_name }}</span></h1>
-<div class="card">
-  <p class="muted">دسته: {{ item.category.name }} · رهگیری: {{ item.get_tracking_mode_display }} · واحد: {{ item.unit_label }}{% if item.is_server %} · سرور کامل{% endif %}{% if item.min_stock %} · حداقل موجودی: {{ item.min_stock }}{% endif %}</p>
-  {% if item.description %}<p>{{ item.description }}</p>{% endif %}
-  {% if item.attributes.all %}<p>{% for a in item.attributes.all %}<span class="badge">{{ a.definition.name }}: {{ a.value }}</span> {% endfor %}</p>{% endif %}
+<div class="pagehead"><div>
+  <h1>{{ item.name }} <span class="muted" style="font-size:15px;font-weight:400">{{ item.brand }} {{ item.model_name }}</span></h1>
+  <p class="sub" style="margin:0">دسته: {{ item.category.name }} · رهگیری: {{ item.get_tracking_mode_display }} · واحد: {{ item.unit_label }}{% if item.is_server %} · <span class="badge badge-installed">سرور کامل</span>{% endif %}{% if item.min_stock %} · حداقل موجودی: {{ item.min_stock }}{% endif %}</p>
 </div>
-<div class="grid g3" style="margin-bottom:16px">
-{% for label,q in summary %}<div class="stat"><b class="num">{{ q }}</b><span>{{ label }}</span></div>{% endfor %}
+{% if perms.inventory.submit_document %}<a class="btn" href="{% url 'panels:new_request' %}">+ ثبت درخواست</a>{% endif %}</div>
+{% if item.description or item.attributes.all %}<div class="card">
+  {% if item.description %}<p style="margin-top:0">{{ item.description }}</p>{% endif %}
+  {% if item.attributes.all %}<p style="margin-bottom:0">{% for a in item.attributes.all %}<span class="badge">{{ a.definition.name }}: {{ a.value }}</span> {% endfor %}</p>{% endif %}
+</div>{% endif %}
+<div class="grid g3" style="margin-bottom:18px">
+{% for key,label,q in summary %}<div class="stat s-{{ key }}"><b class="num">{{ q }}</b><span>{{ label }}</span></div>{% endfor %}
 </div>
 {% if free_by_location %}<div class="card"><h2>موجودی آزاد به تفکیک محل</h2>
-{% for r in free_by_location %}<span class="badge">{{ r.location__name|default:"—" }}: <span class="num">{{ r.q }}</span></span> {% endfor %}</div>{% endif %}
+{% for r in free_by_location %}<span class="badge badge-free" style="margin-left:6px">{{ r.location__name|default:"—" }}: <span class="num">{{ r.q }}</span></span>{% endfor %}</div>{% endif %}
 
-{% if item.tracking_mode != "quantity" or item.is_server %}
-<div class="card"><h2>نمونه‌های فیزیکی</h2>
-<form class="filters" method="get" style="margin-bottom:10px">
-  <div><label>جست‌وجوی سریال</label><input name="u" value="{{ request.GET.u }}"></div>
-  <div><label>وضعیت</label><select name="ustatus"><option value="">همه</option>
+<div class="card"><h2>تک‌تک نمونه‌ها <span class="muted" style="font-size:13px;font-weight:400">— هر قطعه شناسهٔ مستقل دارد (سریال یا کد داخلی)</span></h2>
+{% if legacy %}<div class="legacy">⚠ بخشی از موجودی قدیمی بدون شناسهٔ مستقل ثبت شده ({% for b,q in legacy %}{{ b }}: {{ q }}{% if not forloop.last %}، {% endif %}{% endfor %}). این‌ها در جدول زیر دیده نمی‌شوند ولی در شمارش بالا هستند.</div>{% endif %}
+<form class="filters" method="get" style="margin-bottom:12px">
+  <div><label>جست‌وجوی سریال / کد</label><input name="u" value="{{ request.GET.u }}" dir="ltr"></div>
+  <div><label>وضعیت</label><select name="ustatus"><option value="">همه (بدون خارج‌شده‌ها)</option>
    {% for v,l in unit_statuses %}<option value="{{ v }}" {% if request.GET.ustatus == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
   <div><button class="btn sec">فیلتر</button></div></form>
-<div class="tw"><table><tr><th>سریال</th><th>برچسب</th><th>وضعیت</th><th>محل / نصب روی</th><th></th></tr>
-{% for u in units %}<tr><td class="ltr">{{ u.serial_number|default:"—" }}</td><td>{{ u.label }}</td>
+<form method="post" action="{% url 'panels:unit_action' item.pk %}" id="unit-form">{% csrf_token %}
+<div class="tw"><table><tr>{% if can_act %}<th class="chk"><input type="checkbox" id="all"></th>{% endif %}<th>کد داخلی</th><th>سریال</th><th>وضعیت</th><th>محل / نصب روی</th><th></th></tr>
+{% for u in units %}<tr>{% if can_act %}<td class="chk">{% if u.status == "installed" or u.status == "free" %}<input type="checkbox" name="units" value="{{ u.pk }}" class="pick" data-status="{{ u.status }}">{% endif %}</td>{% endif %}
+ <td class="code">{{ u.asset_code|default:"—" }}</td><td class="code">{{ u.serial_number|default:"—" }}</td>
  <td><span class="badge badge-{{ u.status }}">{{ u.get_status_display }}</span></td>
- <td>{% if u.installed_in %}<a href="{% url 'panels:unit' u.installed_in.pk %}">{{ u.installed_in }}</a>{% else %}{{ u.location|default:"—" }}{% endif %}</td>
+ <td>{% if u.installed_in %}<a href="{% url 'panels:unit' u.installed_in.pk %}">{{ u.installed_in.item_type.name }} <span class="code">{{ u.installed_in.serial_number }}</span></a>{% else %}{{ u.location|default:"—" }}{% endif %}</td>
  <td><a href="{% url 'panels:unit' u.pk %}">جزئیات</a></td></tr>
-{% empty %}<tr><td colspan="5" class="muted">نمونه‌ای یافت نشد.</td></tr>{% endfor %}</table></div>
-{% include "panels/_pager_u.html" %}</div>
+{% empty %}<tr><td colspan="6" class="muted">نمونه‌ای یافت نشد.</td></tr>{% endfor %}</table></div>
+{% include "panels/_pager_u.html" %}
+
+{% if can_act %}
+<div class="actionbar" id="bar">
+  <div style="margin-bottom:8px"><span class="cnt" id="cnt">۰</span> نمونه انتخاب شده <span class="muted" id="bar-hint" style="color:#b9c6e4"> — برای شروع، ردیف‌ها را تیک بزن</span></div>
+  <div class="row">
+    <div><label>عملیات</label><select name="action" id="act">
+      <option value="uninstall">جدا کردن از سرور</option>
+      <option value="move">انتقال به سرور دیگر</option>
+      <option value="install">نصب روی سرور</option></select></div>
+    <div id="f-loc"><label id="loc-label">انبار مقصد</label><select name="location"><option value="">— انتخاب —</option>{% for l in locations %}<option value="{{ l.pk }}">{{ l.name }}</option>{% endfor %}</select></div>
+    <div id="f-srv" class="hide"><label>سریال سرور مقصد</label><input name="target_server" list="srv-list" dir="ltr" autocomplete="off" placeholder="سریال یا انتخاب از لیست"></div>
+    <div><label>توضیح (اختیاری)</label><input name="note" maxlength="500"></div>
+    <div><button class="btn" id="go" disabled>ثبت درخواست برای تأیید</button></div>
+  </div>
+</div>
+<datalist id="srv-list">{% for s in servers %}<option value="{{ s.serial_number }}">{{ s.item_type.name }} — {{ s.get_status_display }}</option>{% endfor %}</datalist>
+<script>
+(function(){
+  var picks=[].slice.call(document.querySelectorAll(".pick")), all=document.getElementById("all"),
+      cnt=document.getElementById("cnt"), go=document.getElementById("go"), act=document.getElementById("act"),
+      fl=document.getElementById("f-loc"), fs=document.getElementById("f-srv"), ll=document.getElementById("loc-label"),
+      hint=document.getElementById("bar-hint");
+  function upd(){
+    var sel=picks.filter(function(p){return p.checked;}), st={};
+    sel.forEach(function(p){st[p.dataset.status]=1;});
+    cnt.textContent=sel.length; go.disabled=!sel.length;
+    var a=act.value; fl.classList.toggle("hide",a==="install"); fs.classList.toggle("hide",a==="uninstall");
+    ll.textContent=a==="move"?"انبار واسط (جدا شدن → نصب)":"انبار مقصد";
+    var bad=(a!=="install"&&st.free)||(a==="install"&&st.installed);
+    hint.textContent=bad?" — این عملیات برای وضعیت انتخاب‌شده معتبر نیست":(sel.length?"":" — برای شروع، ردیف‌ها را تیک بزن");
+    if(bad) go.disabled=true;
+  }
+  picks.forEach(function(p){p.addEventListener("change",upd);});
+  if(all) all.addEventListener("change",function(){picks.forEach(function(p){p.checked=all.checked;});upd();});
+  act.addEventListener("change",upd); upd();
+  document.getElementById("unit-form").addEventListener("submit",function(e){
+    if(!confirm("درخواست ثبت شود؟ تا تأیید مدیر روی موجودی اثری ندارد.")) e.preventDefault();});
+})();
+</script>
 {% endif %}
+</form></div>
 
 <div class="card"><h2>تاریخچه</h2>
-<div class="tw"><table><tr><th>تاریخ وقوع</th><th>عملیات</th><th>سند</th><th>وضعیت موجودی</th><th>محل / سرور</th><th>تغییر</th></tr>
+<div class="tw"><table><tr><th>تاریخ وقوع</th><th>عملیات</th><th>سند</th><th>وضعیت موجودی</th><th>محل / سرور</th><th>شناسه</th><th>تغییر</th></tr>
 {% for e in history %}<tr><td>{{ e.occurred_at|date:"Y/m/d H:i" }}</td><td>{{ e.line.get_operation_display }}</td>
  <td><a href="{% url 'panels:document' e.document_id %}">#{{ e.document_id }}</a></td><td>{{ e.get_bucket_display }}</td>
- <td>{% if e.server %}{{ e.server }}{% else %}{{ e.location|default:"—" }}{% endif %}{% if e.unit %} <span class="muted ltr">{{ e.unit.serial_number }}</span>{% endif %}</td>
+ <td>{% if e.server %}{{ e.server }}{% else %}{{ e.location|default:"—" }}{% endif %}</td>
+ <td class="code muted">{% if e.unit %}{{ e.unit.serial_number|default:e.unit.asset_code }}{% endif %}</td>
  <td class="{% if e.delta > 0 %}pos{% else %}neg{% endif %}">{{ e.delta|stringformat:"+d" }}</td></tr>
-{% empty %}<tr><td colspan="6" class="muted">سابقه‌ای ثبت نشده است.</td></tr>{% endfor %}</table></div>
+{% empty %}<tr><td colspan="7" class="muted">سابقه‌ای ثبت نشده است.</td></tr>{% endfor %}</table></div>
 {% include "panels/_pager.html" %}</div>
 {% endblock %}

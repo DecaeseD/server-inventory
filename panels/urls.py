@@ -13,6 +13,7 @@ urlpatterns = [
     path("items/", views.item_list, name="items"),
     path("items/<int:pk>/", views.item_detail, name="item"),
     path("units/<int:pk>/", views.unit_detail, name="unit"),
+    path("items/<int:pk>/units/action/", views.unit_action, name="unit_action"),
     path("requests/new/", views.new_request, name="new_request"),
     path("requests/", views.my_requests, name="my_requests"),
     path("documents/<int:pk>/", views.document_detail, name="document"),

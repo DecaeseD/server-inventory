@@ -8,14 +8,17 @@
 </head>
 <body>
 {% if user.is_authenticated %}
+{% with cur=request.resolver_match.url_name %}
 <nav class="nav">
-  {% if perms.inventory.approve_document %}<a href="{% url 'panels:approvals' %}">تأیید درخواست‌ها</a>{% endif %}
-  {% if perms.catalog.view_itemtype %}<a href="{% url 'panels:dashboard' %}">داشبورد</a><a href="{% url 'panels:items' %}">کالاها</a>{% endif %}
-  {% if perms.inventory.submit_document %}<a href="{% url 'panels:new_request' %}">ثبت درخواست</a><a href="{% url 'panels:my_requests' %}">درخواست‌های من</a>{% endif %}
+  <span class="brand">📦 انبار هاستینگ</span>
+  {% if perms.inventory.approve_document %}<a href="{% url 'panels:approvals' %}" class="{% if cur == 'approvals' %}on{% endif %}">تأیید درخواست‌ها</a>{% endif %}
+  {% if perms.catalog.view_itemtype %}<a href="{% url 'panels:dashboard' %}" class="{% if cur == 'dashboard' %}on{% endif %}">داشبورد</a><a href="{% url 'panels:items' %}" class="{% if cur == 'items' or cur == 'item' or cur == 'unit' %}on{% endif %}">کالاها</a>{% endif %}
+  {% if perms.inventory.submit_document %}<a href="{% url 'panels:new_request' %}" class="{% if cur == 'new_request' %}on{% endif %}">ثبت درخواست</a><a href="{% url 'panels:my_requests' %}" class="{% if cur == 'my_requests' %}on{% endif %}">درخواست‌های من</a>{% endif %}
   {% if user.is_staff %}<a href="/admin/">ادمین</a>{% endif %}
   <span class="sp"></span><span class="muted">{{ user.get_username }}</span>
   <form method="post" action="{% url 'panels:logout' %}">{% csrf_token %}<button>خروج</button></form>
 </nav>
+{% endwith %}
 {% endif %}
 <div class="wrap">
   {% for m in messages %}<div class="msg {{ m.tags }}">{{ m }}</div>{% endfor %}

@@ -4,6 +4,7 @@ Model: every approved line is a *move* between two "buckets" (free, installed, i
 or between a bucket and the outside world (None). A move writes immutable LedgerEntry rows;
 stock is always SUM(delta) over the ledger. Pending documents never touch the ledger.
 """
+from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import PermissionDenied
@@ -118,8 +119,9 @@ def _validate_line(d):
     if any(not s for s in serials) or len(set(serials)) != len(serials):
         raise InventoryError("شماره سریال‌ها نباید خالی یا تکراری باشند.")
     mode = item.tracking_mode
-    if mode == ItemType.Tracking.QUANTITY and serials:
-        raise InventoryError(f"«{item.name}» تعدادی است و سریال نمی‌پذیرد.")
+    if mode == ItemType.Tracking.QUANTITY and serials and fb is None:
+        raise InventoryError(
+            f"«{item.name}» تعدادی است و هنگام ورود سریال نمی‌پذیرد؛ کد شناسایی داخلی خودکار ساخته می‌شود.")
     if mode == ItemType.Tracking.SERIAL and len(serials) != qty:
         raise InventoryError(f"برای «{item.name}» باید دقیقاً {qty} شماره سریال وارد شود.")
     if mode == ItemType.Tracking.BOTH and serials and len(serials) != qty:
@@ -183,7 +185,7 @@ def create_document(*, user, lines, idempotency_key, occurred_at=None, note=""):
             raise PermissionDenied("کلید درخواست متعلق به کاربر دیگری است.")
         return existing
 
-    normalized = [_validate_line(d) for d in lines]
+    normalized = _order_for_servers([_validate_line(d) for d in lines])
     introduced = set()  # server serials entering the system earlier in this same document
     for n in normalized:
         if n["item_type"].is_server and n["from_bucket"] is None and n["to_bucket"]:
@@ -193,13 +195,14 @@ def create_document(*, user, lines, idempotency_key, occurred_at=None, note=""):
                 item_type__is_server=True, serial_number=ss).exists():
             raise InventoryError(
                 f"سرور با سریال {ss} وجود ندارد. قلم سرور باید پیش از قطعاتش در همین درخواست بیاید.")
+    cfg = InventorySettings.get()
     try:
         with transaction.atomic():
             doc = StockDocument.objects.create(
                 occurred_at=occurred_at or timezone.now(), created_by=user, note=note,
                 idempotency_key=idempotency_key)
-            for n in normalized:
-                StockLine.objects.create(document=doc, **n)
+            created = [StockLine.objects.create(document=doc, **n) for n in normalized]
+            _dry_run(doc, created, cfg)  # same rules as approval; any error aborts the whole request
             record(user=user, action="document_created", obj_type="StockDocument",
                    obj_id=doc.pk, document_id=doc.pk, after={"lines": len(normalized)})
     except IntegrityError:  # concurrent double submit with the same key
@@ -208,6 +211,45 @@ def create_document(*, user, lines, idempotency_key, occurred_at=None, note=""):
             raise
         return existing
     return doc
+
+
+def _order_for_servers(ns):
+    """Parts that travel with a server must be processed in a sensible order:
+    - server LEAVES the system (issue / adjust_out): its parts first, then the server;
+    - server ENTERS the system (purchase / adjust_in): the server first, then its parts."""
+    keys = [float(i) for i in range(len(ns))]
+    leaving, entering = {}, {}
+    for i, n in enumerate(ns):
+        if n["item_type"].is_server:
+            for s_ in n["serials"]:
+                if n["from_bucket"] and n["to_bucket"] is None:
+                    leaving[s_] = i
+                elif n["from_bucket"] is None and n["to_bucket"]:
+                    entering[s_] = i
+    for i, n in enumerate(ns):
+        if n["operation"] not in (Operation.INSTALL, Operation.ENTER_INSTALLED):
+            continue
+        ss = n["server_serial"] or (n["server"].serial_number if n["server"] else "")
+        if ss in leaving and i > leaving[ss]:
+            keys[i] = leaving[ss] - 0.5 + i / 10000.0
+        elif ss in entering and i < entering[ss]:
+            keys[i] = entering[ss] + 0.5 + i / 10000.0
+    return [ns[i] for i in sorted(range(len(ns)), key=lambda i: keys[i])]
+
+
+class _DryRunDone(Exception):
+    pass
+
+
+def _dry_run(doc, lines, cfg):
+    """Execute the document exactly like approval would, then roll everything back.
+    Catches unknown serials, wrong status/location, insufficient stock... at SUBMIT time."""
+    try:
+        with transaction.atomic():
+            _execute(doc, lines, cfg, label_errors=True)
+            raise _DryRunDone
+    except _DryRunDone:
+        pass
 
 
 # ---------------------------------------------------------------- applying moves
@@ -231,6 +273,48 @@ def _resolve_server(line, lock=True):
     return None
 
 
+def _lookup_units(item, ids):
+    """Units of `item` addressed by serial number OR internal asset code (row-locked)."""
+    qs = (Unit.objects.select_for_update().filter(item_type=item)
+          .filter(Q(serial_number__in=ids) | Q(asset_code__in=ids)).order_by("pk"))
+    units = list(qs)
+    found = {u.asset_code: u for u in units if u.asset_code}
+    found.update({u.serial_number: u for u in units if u.serial_number})  # serial wins on a clash
+    return found
+
+
+def _new_units(item, serials=None, count=0):
+    """Create OUT units, each with a unique internal asset code (<item pk>-<running number>).
+    Callers hold the item-type lock, so the running number cannot race."""
+    specs = list(serials) if serials is not None else [None] * count
+    base = Unit.objects.filter(item_type=item).count()
+    objs = [Unit(item_type=item, serial_number=sn, status=UnitStatus.OUT,
+                 asset_code=f"{item.pk}-{base + i + 1:05d}") for i, sn in enumerate(specs)]
+    Unit.objects.bulk_create(objs)
+    by_code = {u.asset_code: u for u in Unit.objects.filter(asset_code__in=[o.asset_code for o in objs])}
+    return [by_code[o.asset_code] for o in objs]
+
+
+def _exit_components_with_server(server_unit, line, doc, cfg):
+    """Issuing a complete server: every part installed on it leaves together with it.
+    Explicit child lines are written so the ledger, history and void stay faithful."""
+    comps = components_of(server_unit)
+    if not comps:
+        return
+    ids = sorted(i for i, _ in comps)
+    list(ItemType.objects.select_for_update().filter(pk__in=ids).order_by("pk"))
+    for item_id, cqty in sorted(comps):
+        cit = ItemType.objects.get(pk=item_id)
+        idents = [u.ident for u in Unit.objects.filter(
+            installed_in=server_unit, item_type_id=item_id, status=UnitStatus.INSTALLED).order_by("pk")]
+        child = StockLine.objects.create(
+            document=doc, item_type=cit, operation=Operation.EXIT_INSTALLED, quantity=cqty,
+            from_bucket=Bucket.INSTALLED, to_bucket=None, server=server_unit,
+            serials=idents[:cqty], parent_line=line,
+            note=f"همراه سرور {server_unit.ident}")
+        _apply_line(child, doc, cfg)
+
+
 def _apply_line(line, doc, cfg):
     item, qty = line.item_type, line.quantity
     fb, tb = line.from_bucket, line.to_bucket
@@ -242,28 +326,7 @@ def _apply_line(line, doc, cfg):
             UnitStatus.OUT, UnitStatus.SCRAPPED):
         raise InventoryError("روی سرور خارج‌شده یا اسقاطی نمی‌توان قطعه نصب کرد.")
 
-    # --- source side: unit state + balance check (under the item-type lock)
-    units = []
-    if line.serials:
-        found = {u.serial_number: u for u in Unit.objects.select_for_update().filter(
-            item_type=item, serial_number__in=line.serials).order_by("pk")}
-        if fb is None:
-            for s in line.serials:
-                u = found.get(s)
-                if u is None:
-                    u = Unit.objects.create(item_type=item, serial_number=s, status=UnitStatus.OUT)
-                elif u.status != UnitStatus.OUT:
-                    raise InventoryError(f"سریال {s} از قبل در سیستم موجود است.")
-                units.append(u)
-        else:
-            for s in line.serials:
-                u = found.get(s)
-                if u is None:
-                    raise InventoryError(f"سریال {s} برای «{item.name}» یافت نشد.")
-                if not _matches(u, fb, floc, server):
-                    raise InventoryError(f"سریال {s} در وضعیت/محل مورد نیاز نیست.")
-                units.append(u)
-
+    # --- source side: balance check first (clear message), then pick the exact units
     if fb is not None and not cfg.allow_negative_stock:
         bal = get_balance(item, fb,
                           location=None if fb == Bucket.INSTALLED else floc,
@@ -272,11 +335,52 @@ def _apply_line(line, doc, cfg):
             raise InventoryError(
                 f"موجودی «{item.name}» کافی نیست (موجود: {bal}، درخواستی: {qty}).")
 
-    # A server may not leave the system / be scrapped while parts are still installed on it.
+    units, rest = [], 0
+    ids = [str(x) for x in (line.serials or [])]
+    picked_ids = None
+    if ids:
+        found = _lookup_units(item, ids)
+        if fb is None:
+            missing = [x for x in ids if x not in found]
+            created = {u.serial_number: u for u in _new_units(item, serials=missing)} if missing else {}
+            for x in ids:
+                u = found.get(x) or created[x]
+                if u.status != UnitStatus.OUT:
+                    raise InventoryError(f"سریال {x} از قبل در سیستم موجود است.")
+                units.append(u)
+        else:
+            for x in ids:
+                u = found.get(x)
+                if u is None:
+                    raise InventoryError(f"سریال/کد {x} برای «{item.name}» یافت نشد.")
+                if not _matches(u, fb, floc, server):
+                    raise InventoryError(f"سریال/کد {x} در وضعیت/محل مورد نیاز نیست.")
+                units.append(u)
+        rest = max(qty - len(units), 0)
+    elif fb is None:
+        # No serials given: every physical piece still gets its own identity (auto asset code).
+        units = _new_units(item, count=qty)
+        picked_ids = [u.ident for u in units]
+    else:
+        qs = Unit.objects.select_for_update().filter(item_type=item, status=fb)
+        qs = qs.filter(installed_in=server) if fb == Bucket.INSTALLED else qs.filter(location=floc)
+        units = list(qs.order_by("pk")[:qty])
+        rest = qty - len(units)  # legacy stock recorded before per-piece identity existed
+        picked_ids = [u.ident for u in units]
+    if picked_ids:
+        # Remember exactly which pieces moved (needed for faithful void). Same transaction.
+        StockLine.objects.filter(pk=line.pk).update(serials=picked_ids)
+        line.serials = picked_ids
+
+    # --- a server leaving the system / being scrapped
     if item.is_server and (tb is None or tb == Bucket.SCRAPPED):
         for u in units:
-            if components_of(u):
-                raise InventoryError(f"ابتدا قطعات نصب‌شده روی سرور {u.serial_number} را جدا کنید.")
+            if not components_of(u):
+                continue
+            if line.operation in (Operation.ISSUE, Operation.ADJUST_OUT):
+                _exit_components_with_server(u, line, doc, cfg)   # parts leave with the server
+            else:
+                raise InventoryError(f"ابتدا قطعات نصب‌شده روی سرور {u.ident} را جدا کنید.")
 
     # --- target side: unit states
     for u in units:
@@ -297,17 +401,16 @@ def _apply_line(line, doc, cfg):
                            occurred_at=doc.occurred_at)
 
     entries = []
-    if units:
-        for u in units:
-            if fb:
-                entries.append(entry(fb, floc, u, -1))
-            if tb:
-                entries.append(entry(tb, tloc, u, +1))
-    else:
+    for u in units:
         if fb:
-            entries.append(entry(fb, floc, None, -qty))
+            entries.append(entry(fb, floc, u, -1))
         if tb:
-            entries.append(entry(tb, tloc, None, +qty))
+            entries.append(entry(tb, tloc, u, +1))
+    if rest > 0:
+        if fb:
+            entries.append(entry(fb, floc, None, -rest))
+        if tb:
+            entries.append(entry(tb, tloc, None, +rest))
     LedgerEntry.objects.bulk_create(entries)
 
 
@@ -317,10 +420,15 @@ def _lock_items(lines):
     list(ItemType.objects.select_for_update().filter(pk__in=ids).order_by("pk"))
 
 
-def _execute(doc, lines, cfg):
+def _execute(doc, lines, cfg, label_errors=False):
     _lock_items(lines)
-    for line in lines:
-        _apply_line(line, doc, cfg)
+    for i, line in enumerate(lines, 1):
+        try:
+            _apply_line(line, doc, cfg)
+        except InventoryError as e:
+            if label_errors:
+                raise InventoryError(f"قلم {i} ({line.item_type.name}): {e}") from e
+            raise
 
 
 # ---------------------------------------------------------------- decisions
@@ -378,7 +486,16 @@ def void_document(document_id, user, reason, ip=None):
             occurred_at=now, created_by=user, note=f"ابطال سند #{orig.pk}: {reason}",
             idempotency_key=f"void-{orig.pk}", reverses=orig)
         rev_lines = []
-        for l in reversed(list(orig.lines.select_related("item_type").order_by("pk"))):
+        orig_lines = list(orig.lines.select_related("item_type").order_by("pk"))
+        kids = defaultdict(list)
+        for l in orig_lines:
+            if l.parent_line_id:
+                kids[l.parent_line_id].append(l)
+        ordered = []
+        for l in reversed([x for x in orig_lines if not x.parent_line_id]):
+            ordered.append(l)           # the parent first (server comes back) ...
+            ordered.extend(kids.get(l.pk, []))  # ... then the parts that left with it
+        for l in ordered:
             rev_lines.append(StockLine.objects.create(
                 document=rev, item_type=l.item_type, operation=Operation.REVERSAL,
                 quantity=l.quantity, unit_price=l.unit_price,

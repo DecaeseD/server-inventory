@@ -13,8 +13,8 @@
 </div>
 <div class="card tw"><h2>اقلام</h2><table>
 <tr><th>کالا</th><th>عملیات</th><th>تعداد</th><th>مبدأ ← مقصد</th><th>سرور</th><th>سریال‌ها</th>{% if show_prices %}<th>قیمت واحد</th><th>مبلغ کل</th>{% endif %}{% if can_approve and doc.status == "pending" %}<th>اثر بر موجودی</th>{% endif %}</tr>
-{% for l in lines %}<tr>
- <td><a href="{% url 'panels:item' l.item_type_id %}">{{ l.item_type.name }}</a></td><td>{{ l.get_operation_display }}</td><td class="num">{{ l.quantity }}</td>
+{% for l in lines %}<tr{% if l.parent_line_id or l.server_id or l.server_serial %}{% if l.operation == "install" or l.operation == "enter_installed" or l.operation == "exit_installed" %} class="child-row"{% endif %}{% endif %}>
+ <td>{% if l.parent_line_id %}<span class="badge auto">همراه سرور · خودکار</span> {% endif %}<a href="{% url 'panels:item' l.item_type_id %}">{{ l.item_type.name }}</a></td><td>{{ l.get_operation_display }}</td><td class="num">{{ l.quantity }}</td>
  <td>{{ l.get_from_bucket_display|default:"بیرون سیستم" }}{% if l.from_location %} ({{ l.from_location }}){% endif %} ← {{ l.get_to_bucket_display|default:"بیرون سیستم" }}{% if l.to_location %} ({{ l.to_location }}){% endif %}</td>
  <td>{% if l.server %}<a href="{% url 'panels:unit' l.server_id %}">{{ l.server }}</a>{% elif l.server_serial %}<span class="ltr">{{ l.server_serial }}</span> <span class="muted">(سرور همین سند)</span>{% else %}—{% endif %}</td>
  <td class="ltr">{{ l.serials|join:"، " }}</td>

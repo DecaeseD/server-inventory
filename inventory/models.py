@@ -35,6 +35,7 @@ class Operation(models.TextChoices):
     INSTALL = "install", "نصب روی سرور"
     ENTER_INSTALLED = "enter_installed", "ورود قطعه‌ی نصب‌شده روی سرور"
     UNINSTALL = "uninstall", "جداسازی از سرور"
+    EXIT_INSTALLED = "exit_installed", "خروج قطعه همراه سرور"
     SEND_DC = "send_dc", "ارسال به دیتاسنتر"
     SEND_REPAIR = "send_repair", "ارسال به تعمیر"
     SCRAP = "scrap", "اسقاط"
@@ -54,6 +55,7 @@ OPERATION_MOVES = {
     Operation.INSTALL: (B.FREE, B.INSTALLED),
     Operation.ENTER_INSTALLED: (None, B.INSTALLED),
     Operation.UNINSTALL: (B.INSTALLED, B.FREE),
+    Operation.EXIT_INSTALLED: (B.INSTALLED, None),
     Operation.SEND_DC: (B.FREE, B.AT_DATACENTER),
     Operation.SEND_REPAIR: (B.FREE, B.IN_REPAIR),
     Operation.SCRAP: (B.FREE, B.SCRAPPED),
@@ -61,7 +63,8 @@ OPERATION_MOVES = {
 }
 
 # Operations that need a server, and operations where a price is meaningful.
-SERVER_OPERATIONS = {Operation.INSTALL, Operation.UNINSTALL, Operation.ENTER_INSTALLED}
+SERVER_OPERATIONS = {Operation.INSTALL, Operation.UNINSTALL, Operation.ENTER_INSTALLED,
+                     Operation.EXIT_INSTALLED}
 PRICED_OPERATIONS = {Operation.PURCHASE, Operation.ENTER_INSTALLED}
 
 
@@ -105,6 +108,8 @@ class Unit(models.Model):
     State changes happen only through inventory.services."""
     item_type = models.ForeignKey("catalog.ItemType", on_delete=models.PROTECT, related_name="units")
     serial_number = models.CharField("شماره سریال", max_length=100, null=True, blank=True)
+    asset_code = models.CharField("کد شناسایی داخلی", max_length=32, null=True, blank=True,
+                                  unique=True, editable=False)
     label = models.CharField("برچسب (مثلاً شماره سرور)", max_length=100, blank=True)
     status = models.CharField("وضعیت", max_length=20, choices=UnitStatus.choices,
                               default=UnitStatus.OUT, db_index=True)
@@ -122,7 +127,12 @@ class Unit(models.Model):
         indexes = [models.Index(fields=["item_type", "status", "location"])]
 
     def __str__(self):
-        return f"{self.item_type.name} [{self.serial_number or self.label or self.pk}]"
+        return f"{self.item_type.name} [{self.serial_number or self.label or self.asset_code or self.pk}]"
+
+    @property
+    def ident(self):
+        """Best human identifier: serial if any, else the internal asset code."""
+        return self.serial_number or self.asset_code or str(self.pk)
 
 
 class StockDocument(models.Model):
@@ -188,6 +198,8 @@ class StockLine(models.Model):
     server_serial = models.CharField("سریال سرور (سرور جدیدِ همین سند)", max_length=100, blank=True)
     serials = models.JSONField("شماره سریال‌ها", default=list, blank=True)
     note = models.CharField("توضیح", max_length=255, blank=True)
+    parent_line = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT,
+                                    related_name="children", verbose_name="قلم والد (خودکار)")
 
     class Meta:
         verbose_name = "قلم سند"

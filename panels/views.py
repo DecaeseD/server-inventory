@@ -4,7 +4,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
-from django.db.models import Count, F, Q
+from django.db.models import Count, F, Q, Sum
 from django.forms import formset_factory
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -13,7 +13,7 @@ from django.views.decorators.http import require_POST
 from catalog.models import Category, ItemType
 from inventory import services as S
 from inventory.models import (OPERATION_MOVES, PRICED_OPERATIONS, SERVER_OPERATIONS, Bucket,
-                              LedgerEntry, StockDocument, Unit)
+                              LedgerEntry, Location, StockDocument, Unit, UnitStatus)
 
 from .forms import DocumentForm, LineForm
 
@@ -79,27 +79,40 @@ def item_list(request):
     })
 
 
+def _active_servers():
+    return (Unit.objects.filter(item_type__is_server=True)
+            .exclude(status__in=[UnitStatus.OUT, UnitStatus.SCRAPPED])
+            .select_related("item_type").order_by("serial_number"))
+
+
 @perm("catalog.view_itemtype")
 def item_detail(request, pk):
     item = get_object_or_404(ItemType.objects.select_related("category")
                              .prefetch_related("attributes__definition"), pk=pk)
     summary = S.stock_summary(item)
-    units = item.units.exclude(status="out").select_related("location", "installed_in")
+    units = item.units.select_related("location", "installed_in", "installed_in__item_type")
     uq = request.GET.get("u", "").strip()
     if uq:
-        units = units.filter(serial_number__icontains=uq)
-    if request.GET.get("ustatus"):
-        units = units.filter(status=request.GET["ustatus"])
+        units = units.filter(Q(serial_number__icontains=uq) | Q(asset_code__icontains=uq))
+    ustatus = request.GET.get("ustatus")
+    units = units.filter(status=ustatus) if ustatus else units.exclude(status=UnitStatus.OUT)
     history = (LedgerEntry.objects.filter(item_type=item)
                .select_related("document", "line", "location", "server", "unit")
                .order_by("-occurred_at", "-id"))
+    legacy = {r["bucket"]: r["t"] for r in LedgerEntry.objects.filter(item_type=item, unit__isnull=True)
+              .values("bucket").annotate(t=Sum("delta")) if r["t"]}
+    can_act = request.user.has_perm("inventory.submit_document") and not item.is_server
     return render(request, "panels/item_detail.html", {
         "item": item,
-        "summary": [(b.label, summary[b.value]) for b in Bucket],
+        "summary": [(b.value, b.label, summary[b.value]) for b in Bucket],
         "free_by_location": _free_by_location(item),
         "units": paginate(request, units.order_by("serial_number", "pk"), 25, "upage"),
         "history": paginate(request, history, 20, "page"),
-        "unit_statuses": [c for c in Unit._meta.get_field("status").choices if c[0] != "out"],
+        "unit_statuses": list(Unit._meta.get_field("status").choices),
+        "legacy": [(dict(Bucket.choices).get(b, b), q) for b, q in legacy.items()],
+        "can_act": can_act,
+        "locations": Location.objects.filter(is_active=True).order_by("name"),
+        "servers": _active_servers() if can_act else [],
     })
 
 
@@ -113,12 +126,13 @@ def _free_by_location(item):
 @perm("catalog.view_itemtype")
 def unit_detail(request, pk):
     unit = get_object_or_404(Unit.objects.select_related("item_type", "location", "installed_in"), pk=pk)
+    parts = (Unit.objects.filter(installed_in=unit).select_related("item_type")
+             .order_by("item_type__name", "serial_number", "pk"))
     comps = []
     for item_id, qty in S.components_of(unit):
         it = ItemType.objects.get(pk=item_id)
-        serials = list(Unit.objects.filter(installed_in=unit, item_type=it)
-                       .order_by("serial_number").values_list("serial_number", flat=True))
-        comps.append({"item": it, "qty": qty, "serials": serials})
+        mine = [u for u in parts if u.item_type_id == item_id]
+        comps.append({"item": it, "qty": qty, "units": mine, "unidentified": max(qty - len(mine), 0)})
     history = (LedgerEntry.objects.filter(Q(unit=unit) | Q(server=unit))
                .select_related("document", "line", "item_type", "location").order_by("-occurred_at", "-id"))
     return render(request, "panels/unit_detail.html", {
@@ -134,9 +148,12 @@ def _ops_meta():
             "to": tb is not None and tb != Bucket.INSTALLED,
             "server": op in SERVER_OPERATIONS,
             "price": op in PRICED_OPERATIONS,
+            "enter": fb is None,
         }
-    servers = list(ItemType.objects.filter(is_server=True, is_active=True).values_list("pk", flat=True))
-    return {"ops": ops, "servers": servers}
+    items = {i.pk: {"server": i.is_server, "mode": i.tracking_mode}
+             for i in ItemType.objects.filter(is_active=True)}
+    servers = [pk for pk, v in items.items() if v["server"]]
+    return {"ops": ops, "servers": servers, "items": items}
 
 
 @perm("inventory.submit_document")
@@ -173,7 +190,7 @@ def new_request(request):
             "occurred_at": timezone.localtime().strftime("%Y-%m-%dT%H:%M")})
         fs = FormSet()
     return render(request, "panels/request_form.html", {
-        "head": head, "fs": fs, "ops_meta": _ops_meta()})  # dict: json_script encodes it once
+        "head": head, "fs": fs, "ops_meta": _ops_meta(), "servers": _active_servers()})  # dict: json_script encodes it once
 
 
 @perm("inventory.submit_document")
@@ -184,6 +201,70 @@ def my_requests(request):
     return render(request, "panels/my_requests.html", {
         "page": paginate(request, qs.order_by("-id")),
         "statuses": StockDocument.Status.choices})
+
+
+# ---------------------------------------------------------------- actions from the item page
+def _find_target_server(text):
+    text = (text or "").strip()
+    found = list(_active_servers().filter(serial_number=text)[:2]) if text else []
+    if len(found) != 1:
+        raise S.InventoryError("سرور مقصد پیدا نشد؛ سریال را دقیق از لیست انتخاب کن." if not found
+                               else "چند سرور با این سریال وجود دارد.")
+    return found[0]
+
+
+@require_POST
+@perm("inventory.submit_document")
+def unit_action(request, pk):
+    """Register a (pending) request for the selected pieces of one item:
+    uninstall from server / move to another server / install a free piece on a server."""
+    item = get_object_or_404(ItemType, pk=pk)
+    back = redirect("panels:item", pk)
+    units = list(Unit.objects.filter(item_type=item, pk__in=request.POST.getlist("units"))
+                 .select_related("location", "installed_in").order_by("pk"))
+    if not units:
+        messages.error(request, "هیچ نمونه‌ای انتخاب نشده است.")
+        return back
+    action = request.POST.get("action")
+    loc = Location.objects.filter(pk=request.POST.get("location") or 0, is_active=True).first()
+    try:
+        lines = []
+        if action in ("uninstall", "move"):
+            if any(u.status != UnitStatus.INSTALLED for u in units):
+                raise S.InventoryError("فقط قطعاتِ نصب‌شده روی سرور را می‌شود جدا یا منتقل کرد.")
+            if loc is None:
+                raise S.InventoryError("انبار مقصد را انتخاب کن.")
+            groups = {}
+            for u in units:
+                groups.setdefault(u.installed_in, []).append(u)
+            for srv, grp in groups.items():
+                lines.append(dict(item_type=item, operation="uninstall", quantity=len(grp),
+                                  to_location=loc, server=srv, serials=[u.ident for u in grp]))
+            if action == "move":
+                target = _find_target_server(request.POST.get("target_server"))
+                if target in groups:
+                    raise S.InventoryError("بعضی از قطعات انتخاب‌شده همین الان روی سرور مقصد هستند.")
+                lines.append(dict(item_type=item, operation="install", quantity=len(units),
+                                  from_location=loc, server=target, serials=[u.ident for u in units]))
+        elif action == "install":
+            if any(u.status != UnitStatus.FREE for u in units):
+                raise S.InventoryError("فقط نمونه‌های آزاد را می‌شود روی سرور نصب کرد.")
+            target = _find_target_server(request.POST.get("target_server"))
+            groups = {}
+            for u in units:
+                groups.setdefault(u.location, []).append(u)
+            for place, grp in groups.items():
+                lines.append(dict(item_type=item, operation="install", quantity=len(grp),
+                                  from_location=place, server=target, serials=[u.ident for u in grp]))
+        else:
+            raise S.InventoryError("عملیات نامعتبر است.")
+        doc = S.create_document(user=request.user, lines=lines, idempotency_key=uuid.uuid4().hex,
+                                note=request.POST.get("note", "")[:500])
+    except S.InventoryError as e:
+        messages.error(request, str(e))
+        return back
+    messages.success(request, f"درخواست #{doc.pk} ثبت شد و منتظر تأیید مدیر است.")
+    return redirect("panels:document", doc.pk)
 
 
 # ---------------------------------------------------------------- documents

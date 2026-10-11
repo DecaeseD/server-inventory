@@ -1,14 +1,20 @@
 <div class="line">
-  <button type="button" class="btn sec rm">حذف</button><b>قلم <span class="ln">#</span></b>
+  <div class="head">
+    <span class="ln">#</span>
+    <span class="kind"><span class="kind-op">قلم جدید</span> <small class="kind-sub"></small></span>
+    <span class="sp"></span>
+    <button type="button" class="btn sec sm rm">حذف</button>
+  </div>
   {% if form.non_field_errors %}<div class="errbox">{{ form.non_field_errors|join:" " }}</div>{% endif %}
   <div class="row">
   {% for f in form.visible_fields %}
-    <div class="fld f-{{ f.name }}" {% if f.name == "serials" or f.name == "note" %}style="grid-column:span 2"{% endif %}>
+    <div class="fld f-{{ f.name }}{% if f.name == 'serials' or f.name == 'note' %} wide{% endif %}">
       <label for="{{ f.id_for_label }}">{{ f.label }}</label>{{ f }}
-      {% if f.help_text %}<div class="muted" style="font-size:12px">{{ f.help_text }}</div>{% endif %}
+      {% if f.help_text %}<div class="hint">{{ f.help_text }}</div>{% endif %}
+      <div class="hint serial-hint hide"></div>
       {% for e in f.errors %}<div class="err">{{ e }}</div>{% endfor %}
     </div>
   {% endfor %}
   </div>
-  <p style="margin:10px 0 0"><button type="button" class="btn sec add-parts hide">+ افزودن قطعات این سرور (رم، CPU، هارد، ...)</button></p>
+  <div class="foot"><button type="button" class="btn parts add-parts hide">+ افزودن سخت‌افزار همراه این سرور (رم، CPU، هارد، ...)</button></div>
 </div>

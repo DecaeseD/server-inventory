@@ -1,3 +1,5 @@
+from unittest import mock
+
 from django.contrib.auth.models import Group, User
 from django.test import TestCase
 from django.urls import reverse
@@ -107,8 +109,13 @@ class PanelTests(TestCase):
 
     def test_approve_failure_is_reported_not_crashed(self):
         self.login(self.keeper)
-        self.client.post(reverse("panels:new_request"), formset([dict(
+        r = self.client.post(reverse("panels:new_request"), formset([dict(
             item_type=self.cpu.pk, operation="issue", quantity=9, from_location=self.loc.pk)]))
+        self.assertContains(r, "موجودی")                      # refused already at submit time
+        self.assertEqual(StockDocument.objects.count(), 0)
+        with mock.patch.object(S, "_dry_run"):                # stock vanished after submit => approval refuses
+            self.client.post(reverse("panels:new_request"), formset([dict(
+                item_type=self.cpu.pk, operation="issue", quantity=9, from_location=self.loc.pk)], key="k-late"))
         doc = StockDocument.objects.get()
         self.login(self.manager)
         r = self.client.post(reverse("panels:approve", args=[doc.pk]), follow=True)
@@ -148,7 +155,7 @@ class PanelTests(TestCase):
         S.approve_document(d2.pk, self.manager)
         self.login(self.keeper)
         r = self.client.get(reverse("panels:unit", args=[srv.pk]))
-        self.assertContains(r, "CPU"); self.assertContains(r, "قطعات فعلی")
+        self.assertContains(r, "CPU"); self.assertContains(r, "سخت‌افزار این سرور")
 
 
 import json
@@ -240,20 +247,24 @@ class ServerComponentsTests(TestCase):
     def test_unknown_server_serial_rejected_and_order_matters(self):
         with self.assertRaises(S.InventoryError):
             self.doc(dict(item_type=self.cpu, operation="enter_installed", quantity=1, server_serial="NOPE"))
-        with self.assertRaises(S.InventoryError):  # part listed before its server
-            self.doc(dict(item_type=self.cpu, operation="enter_installed", quantity=1, server_serial="SRV9"),
+        # a part typed BEFORE its (new) server is fine: the system puts the server first
+        d = self.doc(dict(item_type=self.cpu, operation="enter_installed", quantity=1, server_serial="SRV9"),
                      dict(item_type=self.srv_t, operation="purchase", quantity=1, to_location=self.loc, serials=["SRV9"]))
+        S.approve_document(d.pk, self.manager)
+        self.assertEqual(S.get_balance(self.cpu, "installed"), 1)
 
     def test_server_with_parts_cannot_be_scrapped_until_parts_removed(self):
         S.approve_document(self.server_with_parts().pk, self.manager)
         srv = Unit.objects.get(serial_number="SRV1")
-        d = self.doc(dict(item_type=self.srv_t, operation="scrap", quantity=1, from_location=self.loc,
-                          to_location=self.loc, serials=["SRV1"]))
         with self.assertRaises(S.InventoryError):
-            S.approve_document(d.pk, self.manager)
+            self.doc(dict(item_type=self.srv_t, operation="scrap", quantity=1, from_location=self.loc,
+                          to_location=self.loc, serials=["SRV1"]))
         self.assertEqual(Unit.objects.get(pk=srv.pk).status, "free")
 
     def test_price_ignored_for_non_financial_operations(self):
+        S.approve_document(self.doc(dict(item_type=self.cpu, operation="purchase", quantity=1, to_location=self.loc),
+                                    dict(item_type=self.cpu, operation="send_dc", quantity=1, from_location=self.loc,
+                                         to_location=self.loc)).pk, self.manager)
         d = self.doc(dict(item_type=self.cpu, operation="dc_return", quantity=1, from_location=self.loc,
                           to_location=self.loc, unit_price="999"))
         self.assertIsNone(d.lines.get().unit_price)
@@ -270,3 +281,174 @@ class ServerComponentsTests(TestCase):
         self.assertEqual(doc.lines.count(), 2)
         S.approve_document(doc.pk, self.manager)
         self.assertEqual(S.get_balance(self.ram, "installed"), 2)
+
+
+class ItemPageActionsTests(TestCase):
+    """Uninstall / move / install straight from the item page (all create PENDING requests)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from accounts.apps import create_roles
+        create_roles(None)
+        cat = Category.objects.create(name="c")
+        cls.srv_t = ItemType.objects.create(name="HP G10", category=cat, tracking_mode="serial", is_server=True)
+        cls.ram = ItemType.objects.create(name="RAM", category=cat, tracking_mode="serial")
+        cls.cpu = ItemType.objects.create(name="CPU", category=cat)
+        cls.main = Location.objects.create(name="main")
+        cls.keeper = User.objects.create_user("kp"); cls.keeper.groups.add(Group.objects.get(name="انباردار"))
+        cls.manager = User.objects.create_user("mg"); cls.manager.groups.add(Group.objects.get(name="مدیر کل"))
+        cls.viewer = User.objects.create_user("vw")
+        cls.viewer.user_permissions.add(*__import__("django.contrib.auth.models", fromlist=["Permission"])
+                                        .Permission.objects.filter(codename="view_itemtype"))
+
+    def setUp(self):
+        n = [0]
+        def go(*lines):
+            n[0] += 1
+            d = S.create_document(user=self.keeper, lines=list(lines), idempotency_key=f"s{n[0]}")
+            S.approve_document(d.pk, self.manager)
+        go(dict(item_type=self.srv_t, operation="purchase", quantity=2, to_location=self.main, serials=["A", "B"]),
+           dict(item_type=self.ram, operation="purchase", quantity=3, to_location=self.main, serials=["R1", "R2", "R3"]),
+           dict(item_type=self.cpu, operation="purchase", quantity=3, to_location=self.main))
+        self.a, self.b = Unit.objects.get(serial_number="A"), Unit.objects.get(serial_number="B")
+        go(dict(item_type=self.ram, operation="install", quantity=2, from_location=self.main, server=self.a, serials=["R1", "R2"]),
+           dict(item_type=self.cpu, operation="install", quantity=2, from_location=self.main, server=self.a))
+        self.client.force_login(self.keeper)
+
+    def act(self, item, units, **data):
+        return self.client.post(reverse("panels:unit_action", args=[item.pk]),
+                                dict(units=[u.pk for u in units], **data))
+
+    def approve_last(self):
+        S.approve_document(StockDocument.objects.latest("id").pk, self.manager)
+
+    def test_uninstall_two_rams_back_to_free_stock(self):
+        rams = list(Unit.objects.filter(item_type=self.ram, status="installed"))
+        r = self.act(self.ram, rams, action="uninstall", location=self.main.pk)
+        doc = StockDocument.objects.latest("id")
+        self.assertRedirects(r, reverse("panels:document", args=[doc.pk]))
+        self.assertEqual(doc.status, "pending")
+        self.assertEqual(S.get_balance(self.ram, "installed"), 2)            # nothing moves before approval
+        self.approve_last()
+        self.assertEqual(S.get_balance(self.ram, "installed"), 0)
+        self.assertEqual(S.get_balance(self.ram, "free"), 3)
+        self.assertEqual(S.find_inconsistencies(), [])
+
+    def test_move_rams_to_another_server(self):
+        rams = list(Unit.objects.filter(item_type=self.ram, status="installed"))
+        self.act(self.ram, rams, action="move", location=self.main.pk, target_server="B")
+        self.approve_last()
+        self.assertEqual(S.get_balance(self.ram, "installed", server=self.b), 2)
+        self.assertEqual(S.get_balance(self.ram, "installed", server=self.a), 0)
+        self.assertEqual(S.find_inconsistencies(), [])
+
+    def test_quantity_parts_can_be_picked_individually(self):
+        cpus = list(Unit.objects.filter(item_type=self.cpu, status="installed"))[:1]
+        self.act(self.cpu, cpus, action="uninstall", location=self.main.pk)
+        self.approve_last()
+        self.assertEqual(S.get_balance(self.cpu, "installed", server=self.a), 1)
+        self.assertEqual(S.get_balance(self.cpu, "free"), 2)
+        cpus[0].refresh_from_db(); self.assertEqual(cpus[0].status, "free")
+
+    def test_install_free_piece_on_server(self):
+        free = list(Unit.objects.filter(item_type=self.ram, status="free"))
+        self.act(self.ram, free, action="install", target_server="B")
+        self.approve_last()
+        self.assertEqual(S.get_balance(self.ram, "installed", server=self.b), 1)
+
+    def test_bad_input_is_refused_without_creating_requests(self):
+        before = StockDocument.objects.count()
+        rams = list(Unit.objects.filter(item_type=self.ram, status="installed"))
+        free = list(Unit.objects.filter(item_type=self.ram, status="free"))
+        self.act(self.ram, [], action="uninstall", location=self.main.pk)              # nothing selected
+        self.act(self.ram, rams, action="uninstall")                                    # no destination
+        self.act(self.ram, rams, action="move", location=self.main.pk, target_server="NOPE")
+        self.act(self.ram, rams, action="move", location=self.main.pk, target_server="A")  # already there
+        self.act(self.ram, free, action="uninstall", location=self.main.pk)            # not installed
+        self.act(self.ram, rams, action="install", target_server="B")                  # not free
+        self.act(self.ram, rams, action="bogus")
+        self.assertEqual(StockDocument.objects.count(), before)
+
+    def test_only_units_of_this_item_are_touched(self):
+        cpu = Unit.objects.filter(item_type=self.cpu, status="installed").first()
+        before = StockDocument.objects.count()
+        self.act(self.ram, [cpu], action="uninstall", location=self.main.pk)
+        self.assertEqual(StockDocument.objects.count(), before)
+
+    def test_permissions(self):
+        self.client.force_login(self.viewer)
+        r = self.act(self.ram, list(Unit.objects.filter(item_type=self.ram))[:1], action="uninstall", location=self.main.pk)
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(self.client.get(reverse("panels:unit_action", args=[self.ram.pk])).status_code, 405)  # POST only
+        page = self.client.get(reverse("panels:item", args=[self.ram.pk]))
+        self.assertNotContains(page, 'id="bar"')                                       # no action bar without permission
+        self.assertNotContains(page, 'name="units"')
+
+    def test_item_page_shows_units_of_quantity_items_with_codes(self):
+        r = self.client.get(reverse("panels:item", args=[self.cpu.pk]))
+        self.assertContains(r, "3-00001".replace("3", str(self.cpu.pk), 1))
+        self.assertContains(r, 'id="bar"')
+        self.assertContains(r, 'name="units"')
+
+
+class RequestFormHardwareTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        from accounts.apps import create_roles
+        create_roles(None)
+        cat = Category.objects.create(name="c")
+        cls.srv_t = ItemType.objects.create(name="HP G10", category=cat, tracking_mode="serial", is_server=True)
+        cls.ram = ItemType.objects.create(name="RAM", category=cat, tracking_mode="serial")
+        cls.main = Location.objects.create(name="main")
+        cls.other = Location.objects.create(name="dc")
+        cls.keeper = User.objects.create_user("kp"); cls.keeper.groups.add(Group.objects.get(name="انباردار"))
+        cls.manager = User.objects.create_user("mg"); cls.manager.groups.add(Group.objects.get(name="مدیر کل"))
+        d = S.create_document(user=cls.keeper, idempotency_key="seed", lines=[
+            dict(item_type=cls.srv_t, operation="purchase", quantity=1, to_location=cls.main, serials=["esfand"]),
+            dict(item_type=cls.ram, operation="purchase", quantity=2, to_location=cls.main, serials=["R1", "R2"])])
+        S.approve_document(d.pk, cls.manager)
+
+    def setUp(self):
+        self.client.force_login(self.keeper)
+
+    def test_unknown_server_in_panel_shows_error_and_creates_nothing(self):
+        r = self.client.post(reverse("panels:new_request"), formset([dict(
+            item_type=self.srv_t.pk, operation="send_dc", quantity=1, from_location=self.main.pk,
+            to_location=self.other.pk, serials="taha")], key="k-taha"))
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, "taha")
+        self.assertEqual(StockDocument.objects.filter(idempotency_key="k-taha").count(), 0)
+
+    def test_single_server_serial_field_and_datalist(self):
+        r = self.client.get(reverse("panels:new_request"))
+        self.assertContains(r, 'list="server-serials"')
+        self.assertContains(r, '<option value="esfand">')
+        self.assertNotContains(r, 'name="form-0-server"')
+
+    def test_send_server_with_hardware_in_one_request(self):
+        lines = [
+            dict(item_type=self.srv_t.pk, operation="send_dc", quantity=1, from_location=self.main.pk,
+                 to_location=self.other.pk, serials="esfand"),
+            dict(item_type=self.ram.pk, operation="install", quantity=2, from_location=self.main.pk,
+                 server_serial="esfand", serials="R1\nR2")]
+        r = self.client.post(reverse("panels:new_request"), formset(lines, key="k-hw"))
+        self.assertEqual(r.status_code, 302)
+        doc = StockDocument.objects.get(idempotency_key="k-hw")
+        self.assertEqual(doc.lines.get(operation="install").server.serial_number, "esfand")  # serial resolved to the unit
+        S.approve_document(doc.pk, self.manager)
+        srv = Unit.objects.get(serial_number="esfand")
+        self.assertEqual((srv.status, S.components_of(srv)), ("at_datacenter", [(self.ram.pk, 2)]))
+
+    def test_issue_server_with_hardware_listed_after_it(self):
+        lines = [
+            dict(item_type=self.srv_t.pk, operation="issue", quantity=1, from_location=self.main.pk, serials="esfand"),
+            dict(item_type=self.ram.pk, operation="install", quantity=2, from_location=self.main.pk,
+                 server_serial="esfand", serials="R1\nR2")]
+        self.assertEqual(self.client.post(reverse("panels:new_request"), formset(lines, key="k-iss")).status_code, 302)
+        doc = StockDocument.objects.get(idempotency_key="k-iss")
+        S.approve_document(doc.pk, self.manager)
+        self.assertEqual(Unit.objects.get(serial_number="R1").status, "out")
+        self.assertEqual(Unit.objects.get(serial_number="esfand").status, "out")
+        self.assertEqual(S.find_inconsistencies(), [])
+        page = self.client.get(reverse("panels:document", args=[doc.pk]))
+        self.assertContains(page, "همراه سرور")

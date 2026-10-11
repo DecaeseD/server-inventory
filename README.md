@@ -16,3 +16,11 @@ Upgrade notes (v2):
     python manage.py migrate        # applies 0002 and creates the 3 default roles
     python manage.py setup_roles    # optional; --reset re-applies default role permissions
 Assign users to a role (Group) in /admin/ > Users.
+
+Upgrade notes (v3):
+    python manage.py migrate        # 0003: asset_code per unit (existing units are back-filled) + parent_line
+    * Every physical piece (even "quantity" items) is a Unit with an internal asset code <item pk>-<n>.
+    * Requests are dry-run against the real stock at SUBMIT time (unknown serial, wrong state/place,
+      insufficient quantity are refused immediately, with the line number).
+    * Issuing / reducing a complete server takes its installed parts with it (explicit child lines, voidable).
+    * Manual test checklist: docs/TEST_CHECKLIST.md
