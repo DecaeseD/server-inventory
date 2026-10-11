@@ -1,0 +1,9 @@
+{% extends "panels/base.html" %}
+{% block title %}نشست منقضی شد{% endblock %}
+{% block content %}
+<div class="card" style="max-width:560px;margin:40px auto">
+  <h1>درخواست تأیید نشد</h1>
+  <p>توکن امنیتی فرم با کوکی مرورگر نمی‌خواند (معمولاً صفحه‌ی قدیمی بوده یا کوکی پاک شده).</p>
+  <p><a class="btn" href="{% url 'panels:login' %}">بازگشت و تلاش دوباره</a></p>
+</div>
+{% endblock %}

@@ -1,0 +1,14 @@
+{% extends "panels/base.html" %}
+{% block title %}ورود{% endblock %}
+{% block content %}
+<div class="card login">
+  <h1>ورود به سامانه انبار</h1>
+  <form method="post">{% csrf_token %}
+    {% if form.errors %}<div class="errbox">نام کاربری یا رمز عبور اشتباه است.</div>{% endif %}
+    <p><label>نام کاربری</label>{{ form.username }}</p>
+    <p><label>رمز عبور</label>{{ form.password }}</p>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button class="btn" type="submit">ورود</button>
+  </form>
+</div>
+{% endblock %}

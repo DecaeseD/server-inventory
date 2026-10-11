@@ -1,0 +1,40 @@
+{% extends "panels/base.html" %}
+{% block title %}{{ item.name }}{% endblock %}
+{% block content %}
+<h1>{{ item.name }} <span class="muted" style="font-size:14px">{{ item.brand }} {{ item.model_name }}</span></h1>
+<div class="card">
+  <p class="muted">دسته: {{ item.category.name }} · رهگیری: {{ item.get_tracking_mode_display }} · واحد: {{ item.unit_label }}{% if item.is_server %} · سرور کامل{% endif %}{% if item.min_stock %} · حداقل موجودی: {{ item.min_stock }}{% endif %}</p>
+  {% if item.description %}<p>{{ item.description }}</p>{% endif %}
+  {% if item.attributes.all %}<p>{% for a in item.attributes.all %}<span class="badge">{{ a.definition.name }}: {{ a.value }}</span> {% endfor %}</p>{% endif %}
+</div>
+<div class="grid g3" style="margin-bottom:16px">
+{% for label,q in summary %}<div class="stat"><b class="num">{{ q }}</b><span>{{ label }}</span></div>{% endfor %}
+</div>
+{% if free_by_location %}<div class="card"><h2>موجودی آزاد به تفکیک محل</h2>
+{% for r in free_by_location %}<span class="badge">{{ r.location__name|default:"—" }}: <span class="num">{{ r.q }}</span></span> {% endfor %}</div>{% endif %}
+
+{% if item.tracking_mode != "quantity" or item.is_server %}
+<div class="card"><h2>نمونه‌های فیزیکی</h2>
+<form class="filters" method="get" style="margin-bottom:10px">
+  <div><label>جست‌وجوی سریال</label><input name="u" value="{{ request.GET.u }}"></div>
+  <div><label>وضعیت</label><select name="ustatus"><option value="">همه</option>
+   {% for v,l in unit_statuses %}<option value="{{ v }}" {% if request.GET.ustatus == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+  <div><button class="btn sec">فیلتر</button></div></form>
+<div class="tw"><table><tr><th>سریال</th><th>برچسب</th><th>وضعیت</th><th>محل / نصب روی</th><th></th></tr>
+{% for u in units %}<tr><td class="ltr">{{ u.serial_number|default:"—" }}</td><td>{{ u.label }}</td>
+ <td><span class="badge badge-{{ u.status }}">{{ u.get_status_display }}</span></td>
+ <td>{% if u.installed_in %}<a href="{% url 'panels:unit' u.installed_in.pk %}">{{ u.installed_in }}</a>{% else %}{{ u.location|default:"—" }}{% endif %}</td>
+ <td><a href="{% url 'panels:unit' u.pk %}">جزئیات</a></td></tr>
+{% empty %}<tr><td colspan="5" class="muted">نمونه‌ای یافت نشد.</td></tr>{% endfor %}</table></div>
+{% include "panels/_pager_u.html" %}</div>
+{% endif %}
+
+<div class="card"><h2>تاریخچه</h2>
+<div class="tw"><table><tr><th>تاریخ وقوع</th><th>عملیات</th><th>سند</th><th>وضعیت موجودی</th><th>محل / سرور</th><th>تغییر</th></tr>
+{% for e in history %}<tr><td>{{ e.occurred_at|date:"Y/m/d H:i" }}</td><td>{{ e.line.get_operation_display }}</td>
+ <td><a href="{% url 'panels:document' e.document_id %}">#{{ e.document_id }}</a></td><td>{{ e.get_bucket_display }}</td>
+ <td>{% if e.server %}{{ e.server }}{% else %}{{ e.location|default:"—" }}{% endif %}{% if e.unit %} <span class="muted ltr">{{ e.unit.serial_number }}</span>{% endif %}</td>
+ <td class="{% if e.delta > 0 %}pos{% else %}neg{% endif %}">{{ e.delta|stringformat:"+d" }}</td></tr>
+{% empty %}<tr><td colspan="6" class="muted">سابقه‌ای ثبت نشده است.</td></tr>{% endfor %}</table></div>
+{% include "panels/_pager.html" %}</div>
+{% endblock %}

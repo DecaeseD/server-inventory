@@ -1,0 +1,12 @@
+{% extends "panels/base.html" %}
+{% block title %}درخواست‌های من{% endblock %}
+{% block content %}
+<h1>درخواست‌های من</h1>
+<form class="card filters" method="get"><div><label>وضعیت</label><select name="status"><option value="">همه</option>
+{% for v,l in statuses %}<option value="{{ v }}" {% if request.GET.status == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+<div><button class="btn">فیلتر</button></div></form>
+<div class="card tw"><table><tr><th>#</th><th>وضعیت</th><th>تاریخ ثبت</th><th>دلیل رد</th><th></th></tr>
+{% for d in page %}<tr><td>{{ d.pk }}</td><td><span class="badge badge-{{ d.status }}">{{ d.get_status_display }}</span></td>
+<td>{{ d.created_at|date:"Y/m/d H:i" }}</td><td>{{ d.reject_reason|truncatechars:60 }}</td><td><a href="{% url 'panels:document' d.pk %}">جزئیات</a></td></tr>
+{% empty %}<tr><td colspan="5" class="muted">درخواستی ثبت نشده است.</td></tr>{% endfor %}</table>{% include "panels/_pager.html" %}</div>
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "panels/base.html" %}
+{% block title %}داشبورد{% endblock %}
+{% block content %}
+<h1>داشبورد انباردار</h1>
+<div class="grid g3" style="margin-bottom:16px">
+  <div class="stat"><b>{{ counts.pending|default:0 }}</b><span>در انتظار تأیید</span></div>
+  <div class="stat"><b>{{ counts.approved|default:0 }}</b><span>تأییدشده</span></div>
+  <div class="stat"><b>{{ counts.rejected|default:0 }}</b><span>ردشده</span></div>
+</div>
+<div class="card"><h2>هشدار حداقل موجودی</h2>
+{% if low %}<div class="tw"><table><tr><th>کالا</th><th>موجودی آزاد</th><th>حداقل</th></tr>
+{% for i in low %}<tr><td><a href="{% url 'panels:item' i.pk %}">{{ i.name }}</a></td><td class="num">{{ i.qty_free }}</td><td class="num">{{ i.min_stock }}</td></tr>{% endfor %}
+</table></div>{% else %}<p class="muted">کالایی زیر حداقل موجودی نیست.</p>{% endif %}</div>
+<div class="card"><h2>آخرین درخواست‌های من</h2>
+{% if recent %}<div class="tw"><table><tr><th>#</th><th>وضعیت</th><th>ثبت</th><th></th></tr>
+{% for d in recent %}<tr><td>{{ d.pk }}</td><td><span class="badge badge-{{ d.status }}">{{ d.get_status_display }}</span></td><td>{{ d.created_at|date:"Y/m/d H:i" }}</td><td><a href="{% url 'panels:document' d.pk %}">جزئیات</a></td></tr>{% endfor %}
+</table></div>{% else %}<p class="muted">هنوز درخواستی ثبت نکرده‌اید.</p>{% endif %}</div>
+{% endblock %}

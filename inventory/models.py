@@ -33,6 +33,7 @@ class Operation(models.TextChoices):
     ISSUE = "issue", "خروج / مصرف"
     ADJUST_OUT = "adjust_out", "کاهش (اصلاح موجودی)"
     INSTALL = "install", "نصب روی سرور"
+    ENTER_INSTALLED = "enter_installed", "ورود قطعه‌ی نصب‌شده روی سرور"
     UNINSTALL = "uninstall", "جداسازی از سرور"
     SEND_DC = "send_dc", "ارسال به دیتاسنتر"
     SEND_REPAIR = "send_repair", "ارسال به تعمیر"
@@ -51,12 +52,17 @@ OPERATION_MOVES = {
     Operation.ISSUE: (B.FREE, None),
     Operation.ADJUST_OUT: (B.FREE, None),
     Operation.INSTALL: (B.FREE, B.INSTALLED),
+    Operation.ENTER_INSTALLED: (None, B.INSTALLED),
     Operation.UNINSTALL: (B.INSTALLED, B.FREE),
     Operation.SEND_DC: (B.FREE, B.AT_DATACENTER),
     Operation.SEND_REPAIR: (B.FREE, B.IN_REPAIR),
     Operation.SCRAP: (B.FREE, B.SCRAPPED),
     Operation.TRANSFER: (B.FREE, B.FREE),
 }
+
+# Operations that need a server, and operations where a price is meaningful.
+SERVER_OPERATIONS = {Operation.INSTALL, Operation.UNINSTALL, Operation.ENTER_INSTALLED}
+PRICED_OPERATIONS = {Operation.PURCHASE, Operation.ENTER_INSTALLED}
 
 
 class InventorySettings(models.Model):
@@ -179,6 +185,7 @@ class StockLine(models.Model):
                                     related_name="+", verbose_name="مقصد")
     server = models.ForeignKey(Unit, null=True, blank=True, on_delete=models.PROTECT,
                                related_name="+", verbose_name="سرور مرتبط")
+    server_serial = models.CharField("سریال سرور (سرور جدیدِ همین سند)", max_length=100, blank=True)
     serials = models.JSONField("شماره سریال‌ها", default=list, blank=True)
     note = models.CharField("توضیح", max_length=255, blank=True)
 

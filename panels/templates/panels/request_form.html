@@ -1,0 +1,25 @@
+{% extends "panels/base.html" %}
+{% load static %}
+{% block title %}ثبت درخواست{% endblock %}
+{% block content %}
+<h1>ثبت درخواست انبار</h1>
+<p class="muted">درخواست پس از ثبت تا تأیید مدیر روی موجودی اثری ندارد. هر درخواست می‌تواند چند قلم داشته باشد.</p>
+<form method="post" id="req-form">{% csrf_token %}
+  <div class="card">
+    {% if head.non_field_errors %}<div class="errbox">{{ head.non_field_errors|join:" " }}</div>{% endif %}
+    {{ head.idempotency_key }}
+    <div class="filters">
+      <div><label>{{ head.occurred_at.label }}</label>{{ head.occurred_at }}{% for e in head.occurred_at.errors %}<div class="err">{{ e }}</div>{% endfor %}</div>
+      <div style="grid-column:span 2"><label>{{ head.note.label }}</label>{{ head.note }}</div>
+    </div>
+  </div>
+  {{ fs.management_form }}
+  {% if fs.non_form_errors %}<div class="errbox">{{ fs.non_form_errors|join:" " }}</div>{% endif %}
+  <div id="lines">{% for form in fs %}{% include "panels/_line.html" %}{% endfor %}</div>
+  <p><button type="button" class="btn sec" id="add-line">+ افزودن قلم</button></p>
+  <p><button type="submit" class="btn">ثبت درخواست</button></p>
+</form>
+<template id="line-template">{% include "panels/_line.html" with form=fs.empty_form %}</template>
+{{ ops_meta|json_script:"ops-meta" }}
+<script src="{% static 'panels/request_form.js' %}"></script>
+{% endblock %}

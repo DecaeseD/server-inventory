@@ -1,0 +1,36 @@
+{% extends "panels/base.html" %}
+{% block title %}سند #{{ doc.pk }}{% endblock %}
+{% block content %}
+<h1>سند #{{ doc.pk }} <span class="badge badge-{{ doc.status }}">{{ doc.get_status_display }}</span></h1>
+<div class="card">
+  <p>ثبت‌کننده: {{ doc.created_by.get_username }} · وقوع: {{ doc.occurred_at|date:"Y/m/d H:i" }} · ثبت: {{ doc.created_at|date:"Y/m/d H:i" }}</p>
+  {% if doc.note %}<p>توضیحات: {{ doc.note }}</p>{% endif %}
+  {% if doc.decided_by %}<p>تصمیم‌گیرنده: {{ doc.decided_by.get_username }} در {{ doc.decided_at|date:"Y/m/d H:i" }}</p>{% endif %}
+  {% if doc.reject_reason %}<div class="errbox">دلیل رد: {{ doc.reject_reason }}</div>{% endif %}
+  {% if doc.void_reason %}<div class="errbox">دلیل ابطال: {{ doc.void_reason }}</div>{% endif %}
+  {% if doc.reverses %}<p>این سند، معکوس سند <a href="{% url 'panels:document' doc.reverses_id %}">#{{ doc.reverses_id }}</a> است.</p>{% endif %}
+  {% if doc.reversed_by %}<p>باطل‌شده با سند <a href="{% url 'panels:document' doc.reversed_by.pk %}">#{{ doc.reversed_by.pk }}</a></p>{% endif %}
+</div>
+<div class="card tw"><h2>اقلام</h2><table>
+<tr><th>کالا</th><th>عملیات</th><th>تعداد</th><th>مبدأ ← مقصد</th><th>سرور</th><th>سریال‌ها</th>{% if show_prices %}<th>قیمت واحد</th><th>مبلغ کل</th>{% endif %}{% if can_approve and doc.status == "pending" %}<th>اثر بر موجودی</th>{% endif %}</tr>
+{% for l in lines %}<tr>
+ <td><a href="{% url 'panels:item' l.item_type_id %}">{{ l.item_type.name }}</a></td><td>{{ l.get_operation_display }}</td><td class="num">{{ l.quantity }}</td>
+ <td>{{ l.get_from_bucket_display|default:"بیرون سیستم" }}{% if l.from_location %} ({{ l.from_location }}){% endif %} ← {{ l.get_to_bucket_display|default:"بیرون سیستم" }}{% if l.to_location %} ({{ l.to_location }}){% endif %}</td>
+ <td>{% if l.server %}<a href="{% url 'panels:unit' l.server_id %}">{{ l.server }}</a>{% elif l.server_serial %}<span class="ltr">{{ l.server_serial }}</span> <span class="muted">(سرور همین سند)</span>{% else %}—{% endif %}</td>
+ <td class="ltr">{{ l.serials|join:"، " }}</td>
+ {% if show_prices %}<td class="num">{{ l.unit_price|default_if_none:"—" }}</td><td class="num">{{ l.total_price|default_if_none:"—" }}</td>{% endif %}
+ {% if can_approve and doc.status == "pending" %}<td>{% if l.impact %}موجودی فعلی <b class="num">{{ l.impact.current }}</b> ← <b class="num {% if not l.impact.ok %}neg{% endif %}">{{ l.impact.after }}</b>{% if not l.impact.ok %} <span class="err">ناکافی</span>{% endif %}{% else %}افزایش{% endif %}</td>{% endif %}
+</tr>{% endfor %}</table></div>
+
+{% if can_approve and doc.status == "pending" %}
+<div class="card"><h2>تصمیم</h2>
+ <form method="post" action="{% url 'panels:approve' doc.pk %}" style="display:inline" onsubmit="return confirm('این درخواست تأیید و موجودی اعمال شود؟')">{% csrf_token %}<button class="btn ok">تأیید</button></form>
+ <form method="post" action="{% url 'panels:reject' doc.pk %}" style="margin-top:12px">{% csrf_token %}
+  <label>دلیل رد (الزامی)</label><textarea name="reason" rows="2" required></textarea><br><br><button class="btn bad" onclick="return confirm('درخواست رد شود؟')">رد درخواست</button></form></div>
+{% endif %}
+{% if can_void and doc.status == "approved" and not doc.reverses %}
+<div class="card"><h2>ابطال سند</h2><p class="muted">سند معکوس ثبت می‌شود و سابقه‌ی اولیه دست‌نخورده می‌ماند. اگر موجودی بعدی مصرف شده باشد، ابطال انجام نمی‌شود.</p>
+ <form method="post" action="{% url 'panels:void' doc.pk %}">{% csrf_token %}<label>دلیل ابطال (الزامی)</label><textarea name="reason" rows="2" required></textarea><br><br>
+ <button class="btn bad" onclick="return confirm('سند باطل شود؟')">ابطال</button></form></div>
+{% endif %}
+{% endblock %}

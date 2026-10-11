@@ -1,0 +1,24 @@
+{% extends "panels/base.html" %}
+{% block title %}کالاها{% endblock %}
+{% block content %}
+<h1>کالاها و موجودی</h1>
+<form class="card filters" method="get">
+  <div><label>جست‌وجو (نام، مدل، SKU، سریال)</label><input name="q" value="{{ request.GET.q }}"></div>
+  <div><label>دسته‌بندی</label><select name="category"><option value="">همه</option>
+    {% for c in categories %}<option value="{{ c.pk }}" {% if request.GET.category == c.pk|stringformat:"s" %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></div>
+  <div><label>رهگیری</label><select name="tracking"><option value="">همه</option>
+    {% for v,l in tracking_choices %}<option value="{{ v }}" {% if request.GET.tracking == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+  <div><label><input type="checkbox" name="low" value="1" style="width:auto" {% if request.GET.low %}checked{% endif %}> فقط زیر حداقل</label>
+       <label><input type="checkbox" name="inactive" value="1" style="width:auto" {% if request.GET.inactive %}checked{% endif %}> نمایش غیرفعال‌ها</label></div>
+  <div><button class="btn" type="submit">فیلتر</button></div>
+</form>
+<div class="card tw"><table>
+<tr><th>کالا</th><th>دسته</th><th>رهگیری</th><th>آزاد</th><th>نصب‌شده</th><th>تعمیر</th><th>دیتاسنتر</th><th></th></tr>
+{% for i in page %}<tr>
+ <td><a href="{% url 'panels:item' i.pk %}">{{ i.name }}</a> <span class="muted">{{ i.brand }} {{ i.model_name }}</span>{% if not i.is_active %} <span class="badge">غیرفعال</span>{% endif %}</td>
+ <td>{{ i.category.name }}</td><td>{{ i.get_tracking_mode_display }}</td>
+ <td class="num">{{ i.qty_free }}</td><td class="num">{{ i.qty_installed }}</td><td class="num">{{ i.qty_in_repair }}</td><td class="num">{{ i.qty_at_datacenter }}</td>
+ <td>{% if i.min_stock and i.qty_free < i.min_stock %}<span class="badge badge-rejected">زیر حداقل</span>{% endif %}</td></tr>
+{% empty %}<tr><td colspan="8" class="muted">موردی یافت نشد.</td></tr>{% endfor %}
+</table>{% include "panels/_pager.html" %}</div>
+{% endblock %}

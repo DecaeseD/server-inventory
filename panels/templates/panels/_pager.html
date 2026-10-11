@@ -1,0 +1,7 @@
+{% if page.paginator.num_pages > 1 %}
+<div class="pager">
+  {% if page.has_previous %}<a class="btn sec" href="?{% querystring page=page.previous_page_number %}">قبلی</a>{% endif %}
+  <span class="muted">صفحه {{ page.number }} از {{ page.paginator.num_pages }}</span>
+  {% if page.has_next %}<a class="btn sec" href="?{% querystring page=page.next_page_number %}">بعدی</a>{% endif %}
+</div>
+{% endif %}

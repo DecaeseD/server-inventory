@@ -8,14 +8,16 @@ from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import PermissionDenied
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from audit.models import record
 from catalog.models import ItemType
 
-from .models import (OPERATION_MOVES, Bucket, InventorySettings, LedgerEntry, Operation,
-                     StockDocument, StockLine, Unit, UnitStatus)
+from .models import (OPERATION_MOVES, PRICED_OPERATIONS, SERVER_OPERATIONS, Bucket,
+                     InventorySettings, LedgerEntry, Operation, StockDocument, StockLine, Unit,
+                     UnitStatus)
 
 ANY = object()  # wildcard for balance filters (None means "exactly NULL")
 
@@ -55,6 +57,32 @@ def components_of(server):
     rows = (LedgerEntry.objects.filter(bucket=Bucket.INSTALLED, server=server)
             .values("item_type").annotate(t=Sum("delta")).filter(t__gt=0))
     return [(r["item_type"], r["t"]) for r in rows]
+
+
+def stock_table(queryset=None):
+    """ItemType queryset annotated with qty_<bucket> (same SUM(delta) logic as get_balance)."""
+    qs = queryset if queryset is not None else ItemType.objects.all()
+    return qs.annotate(**{
+        f"qty_{b.value}": Coalesce(Sum("ledger_entries__delta",
+                                       filter=Q(ledger_entries__bucket=b.value)), 0)
+        for b in Bucket})
+
+
+def preview_line(line):
+    """Impact of a pending line on its source bucket (approximate: ignores earlier lines
+    of the same document; the real check happens atomically at approval)."""
+    if line.from_bucket is None:
+        return None
+    installed = line.from_bucket == Bucket.INSTALLED
+    server = None
+    if installed:
+        try:
+            server = _resolve_server(line, lock=False)
+        except InventoryError:
+            return {"current": 0, "after": -line.quantity, "ok": False}
+    cur = get_balance(line.item_type, line.from_bucket,
+                      location=None if installed else line.from_location, server=server)
+    return {"current": cur, "after": cur - line.quantity, "ok": cur >= line.quantity}
 
 
 def find_inconsistencies():
@@ -109,15 +137,20 @@ def _validate_line(d):
         raise InventoryError("مبدأ و مقصد انتقال یکسان است.")
 
     server = d.get("server")
-    if op in (Operation.INSTALL, Operation.UNINSTALL):
-        if server is None or not server.item_type.is_server:
-            raise InventoryError("برای نصب/جداسازی باید یک سرور معتبر انتخاب شود.")
+    server_serial = (d.get("server_serial") or "").strip()
+    if op in SERVER_OPERATIONS:
+        if server is None and not server_serial:
+            raise InventoryError("برای این عملیات باید سرور (یا سریال سرور) مشخص شود.")
+        if server is not None:
+            if not server.item_type.is_server:
+                raise InventoryError("واحد انتخاب‌شده سرور نیست.")
+            server_serial = ""
         if item.is_server:
             raise InventoryError("سرور را نمی‌توان روی سرور نصب کرد.")
     else:
-        server = None
+        server, server_serial = None, ""
 
-    price = d.get("unit_price")
+    price = d.get("unit_price") if op in PRICED_OPERATIONS else None  # price only where it makes sense
     if price is not None:
         try:
             price = Decimal(str(price))
@@ -128,7 +161,11 @@ def _validate_line(d):
 
     return dict(item_type=item, operation=op, quantity=qty, unit_price=price,
                 from_bucket=fb, to_bucket=tb, from_location=floc, to_location=tloc,
-                server=server, serials=serials, note=d.get("note", ""))
+                server=server, server_serial=server_serial, serials=serials,
+                note=d.get("note", ""))
+
+
+validate_line = _validate_line  # public alias (used by forms to report per-line errors)
 
 
 # ---------------------------------------------------------------- creating requests
@@ -147,6 +184,15 @@ def create_document(*, user, lines, idempotency_key, occurred_at=None, note=""):
         return existing
 
     normalized = [_validate_line(d) for d in lines]
+    introduced = set()  # server serials entering the system earlier in this same document
+    for n in normalized:
+        if n["item_type"].is_server and n["from_bucket"] is None and n["to_bucket"]:
+            introduced.update(n["serials"])
+        ss = n["server_serial"]
+        if ss and ss not in introduced and not Unit.objects.filter(
+                item_type__is_server=True, serial_number=ss).exists():
+            raise InventoryError(
+                f"سرور با سریال {ss} وجود ندارد. قلم سرور باید پیش از قطعاتش در همین درخواست بیاید.")
     try:
         with transaction.atomic():
             doc = StockDocument.objects.create(
@@ -173,15 +219,28 @@ def _matches(unit, bucket, location, server):
     return unit.location_id == (location.pk if location else None)
 
 
+def _resolve_server(line, lock=True):
+    qs = Unit.objects.select_for_update() if lock else Unit.objects
+    if line.server_id:
+        return qs.get(pk=line.server_id)
+    if line.server_serial:
+        found = list(qs.filter(item_type__is_server=True, serial_number=line.server_serial))
+        if len(found) != 1:
+            raise InventoryError(f"سرور با سریال {line.server_serial} یافت نشد یا یکتا نیست.")
+        return found[0]
+    return None
+
+
 def _apply_line(line, doc, cfg):
     item, qty = line.item_type, line.quantity
     fb, tb = line.from_bucket, line.to_bucket
     floc, tloc = line.from_location, line.to_location
-    server = None
-    if line.server_id:
-        server = Unit.objects.select_for_update().get(pk=line.server_id)
-        if tb == Bucket.INSTALLED and server.status in (UnitStatus.OUT, UnitStatus.SCRAPPED):
-            raise InventoryError("روی سرور خارج‌شده یا اسقاطی نمی‌توان قطعه نصب کرد.")
+    server = _resolve_server(line)
+    if server is None and Bucket.INSTALLED in (fb, tb):
+        raise InventoryError("سرور مشخص نشده است.")
+    if server is not None and tb == Bucket.INSTALLED and server.status in (
+            UnitStatus.OUT, UnitStatus.SCRAPPED):
+        raise InventoryError("روی سرور خارج‌شده یا اسقاطی نمی‌توان قطعه نصب کرد.")
 
     # --- source side: unit state + balance check (under the item-type lock)
     units = []
@@ -212,6 +271,12 @@ def _apply_line(line, doc, cfg):
         if bal < qty:
             raise InventoryError(
                 f"موجودی «{item.name}» کافی نیست (موجود: {bal}، درخواستی: {qty}).")
+
+    # A server may not leave the system / be scrapped while parts are still installed on it.
+    if item.is_server and (tb is None or tb == Bucket.SCRAPPED):
+        for u in units:
+            if components_of(u):
+                raise InventoryError(f"ابتدا قطعات نصب‌شده روی سرور {u.serial_number} را جدا کنید.")
 
     # --- target side: unit states
     for u in units:
@@ -319,7 +384,8 @@ def void_document(document_id, user, reason, ip=None):
                 quantity=l.quantity, unit_price=l.unit_price,
                 from_bucket=l.to_bucket, to_bucket=l.from_bucket,
                 from_location=l.to_location, to_location=l.from_location,
-                server=l.server, serials=l.serials, note=f"معکوس قلم #{l.pk}"))
+                server=l.server, server_serial=l.server_serial, serials=l.serials,
+                note=f"معکوس قلم #{l.pk}"))
         _execute(rev, rev_lines, cfg)
         rev.status = StockDocument.Status.APPROVED
         rev.decided_by, rev.decided_at = user, now

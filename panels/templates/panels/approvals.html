@@ -1,0 +1,16 @@
+{% extends "panels/base.html" %}
+{% block title %}تأیید درخواست‌ها{% endblock %}
+{% block content %}
+<h1>درخواست‌های انبار <span class="muted" style="font-size:14px">({{ pending_count }} در انتظار تأیید)</span></h1>
+<form class="card filters" method="get">
+ <div><label>وضعیت</label><select name="status"><option value="all" {% if status == "all" %}selected{% endif %}>همه</option>
+ {% for v,l in statuses %}<option value="{{ v }}" {% if status == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
+ <div><label>جست‌وجو (شماره، کاربر، کالا، توضیح)</label><input name="q" value="{{ request.GET.q }}"></div>
+ <div><label>از تاریخ</label><input type="date" name="date_from" value="{{ request.GET.date_from }}"></div>
+ <div><label>تا تاریخ</label><input type="date" name="date_to" value="{{ request.GET.date_to }}"></div>
+ <div><button class="btn">فیلتر</button></div></form>
+<div class="card tw"><table><tr><th>#</th><th>وضعیت</th><th>ثبت‌کننده</th><th>تاریخ ثبت</th><th>تصمیم‌گیرنده</th><th></th></tr>
+{% for d in page %}<tr><td>{{ d.pk }}</td><td><span class="badge badge-{{ d.status }}">{{ d.get_status_display }}</span></td><td>{{ d.created_by.get_username }}</td>
+<td>{{ d.created_at|date:"Y/m/d H:i" }}</td><td>{{ d.decided_by.get_username|default:"—" }}</td><td><a href="{% url 'panels:document' d.pk %}">بررسی</a></td></tr>
+{% empty %}<tr><td colspan="6" class="muted">موردی یافت نشد.</td></tr>{% endfor %}</table>{% include "panels/_pager.html" %}</div>
+{% endblock %}

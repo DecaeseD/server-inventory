@@ -1,0 +1,11 @@
+{% extends "panels/base.html" %}
+{% block title %}دسترسی ندارید{% endblock %}
+{% block content %}
+<div class="card" style="max-width:560px;margin:40px auto">
+  <h1>دسترسی ندارید</h1>
+  <p>{% if exception %}{{ exception }}{% else %}شما مجوز دیدن این صفحه را ندارید.{% endif %}</p>
+  <p class="muted">اگر تازه حساب ساخته‌اید، مدیر باید یکی از نقش‌ها (انباردار، حسابدار یا مدیر کل) را به آن بدهد.</p>
+  {% if user.is_authenticated %}<p class="muted">وارد شده با: {{ user.get_username }} — از منوی بالا می‌توانید خارج شوید.</p>
+  {% else %}<a class="btn" href="{% url 'panels:login' %}">ورود</a>{% endif %}
+</div>
+{% endblock %}

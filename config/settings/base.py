@@ -13,8 +13,10 @@ def _load_env(path):
 
 _load_env(BASE_DIR / ".env")
 
-
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
+if not SECRET_KEY:
+    raise RuntimeError("DJANGO_SECRET_KEY تنظیم نشده یا خالیه (فایل .env رو چک کن).")
+SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
 DEBUG = False
 ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h]
 
@@ -28,6 +30,7 @@ INSTALLED_APPS = [
     "catalog",
     "audit",
     "inventory",
+    "panels",
     "accounts",  # keep last: creates role groups after all permissions exist
 ]
 
@@ -60,8 +63,8 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",
         "NAME": os.environ.get("DB_NAME", "warehouse"),
-        "USER": os.environ.get("DB_USER", "inventory"),
-        "PASSWORD": os.environ.get("DB_PASSWORD", "InventorY123$!"),
+        "USER": os.environ.get("DB_USER", "warehouse"),
+        "PASSWORD": os.environ.get("DB_PASSWORD", ""),
         "HOST": os.environ.get("DB_HOST", "127.0.0.1"),
         "PORT": os.environ.get("DB_PORT", "3306"),
         "OPTIONS": {
@@ -87,3 +90,13 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+LOGIN_URL = "panels:login"
+LOGIN_REDIRECT_URL = "panels:home"
+LOGOUT_REDIRECT_URL = "panels:login"
+
+# Unique cookie names: cookies are NOT isolated by port, so other Django projects on
+# 127.0.0.1/localhost would otherwise overwrite our csrftoken/sessionid cookies.
+CSRF_COOKIE_NAME = "warehouse_csrftoken"
+SESSION_COOKIE_NAME = "warehouse_sessionid"
+CSRF_FAILURE_VIEW = "panels.views.csrf_failure"

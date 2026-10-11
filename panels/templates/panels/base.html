@@ -1,0 +1,24 @@
+{% load static %}<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}انبار{% endblock %} | انبار هاستینگ</title>
+<link rel="stylesheet" href="{% static 'panels/app.css' %}">
+</head>
+<body>
+{% if user.is_authenticated %}
+<nav class="nav">
+  {% if perms.inventory.approve_document %}<a href="{% url 'panels:approvals' %}">تأیید درخواست‌ها</a>{% endif %}
+  {% if perms.catalog.view_itemtype %}<a href="{% url 'panels:dashboard' %}">داشبورد</a><a href="{% url 'panels:items' %}">کالاها</a>{% endif %}
+  {% if perms.inventory.submit_document %}<a href="{% url 'panels:new_request' %}">ثبت درخواست</a><a href="{% url 'panels:my_requests' %}">درخواست‌های من</a>{% endif %}
+  {% if user.is_staff %}<a href="/admin/">ادمین</a>{% endif %}
+  <span class="sp"></span><span class="muted">{{ user.get_username }}</span>
+  <form method="post" action="{% url 'panels:logout' %}">{% csrf_token %}<button>خروج</button></form>
+</nav>
+{% endif %}
+<div class="wrap">
+  {% for m in messages %}<div class="msg {{ m.tags }}">{{ m }}</div>{% endfor %}
+  {% block content %}{% endblock %}
+</div>
+</body></html>

@@ -1,0 +1,7 @@
+{% if units.paginator.num_pages > 1 %}
+<div class="pager">
+  {% if units.has_previous %}<a class="btn sec" href="?{% querystring upage=units.previous_page_number %}">قبلی</a>{% endif %}
+  <span class="muted">صفحه {{ units.number }} از {{ units.paginator.num_pages }}</span>
+  {% if units.has_next %}<a class="btn sec" href="?{% querystring upage=units.next_page_number %}">بعدی</a>{% endif %}
+</div>
+{% endif %}

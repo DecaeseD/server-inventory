@@ -1,0 +1,14 @@
+<div class="line">
+  <button type="button" class="btn sec rm">حذف</button><b>قلم <span class="ln">#</span></b>
+  {% if form.non_field_errors %}<div class="errbox">{{ form.non_field_errors|join:" " }}</div>{% endif %}
+  <div class="row">
+  {% for f in form.visible_fields %}
+    <div class="fld f-{{ f.name }}" {% if f.name == "serials" or f.name == "note" %}style="grid-column:span 2"{% endif %}>
+      <label for="{{ f.id_for_label }}">{{ f.label }}</label>{{ f }}
+      {% if f.help_text %}<div class="muted" style="font-size:12px">{{ f.help_text }}</div>{% endif %}
+      {% for e in f.errors %}<div class="err">{{ e }}</div>{% endfor %}
+    </div>
+  {% endfor %}
+  </div>
+  <p style="margin:10px 0 0"><button type="button" class="btn sec add-parts hide">+ افزودن قطعات این سرور (رم، CPU، هارد، ...)</button></p>
+</div>
