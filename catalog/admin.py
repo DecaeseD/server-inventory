@@ -9,8 +9,9 @@ class AttrInline(admin.TabularInline):
 
 
 def snapshot(it):
-    return {f: getattr(it, f) for f in ("name", "brand", "model_name", "unit_label",
-            "tracking_mode", "is_server", "min_stock", "is_active", "sku", "description")}
+    return {f: (str(getattr(it, f)) if f == "capacity" and getattr(it, f) is not None else getattr(it, f)) for f in ("name", "brand", "model_name", "unit_label",
+            "tracking_mode", "is_server", "min_stock", "is_active", "sku", "description",
+            "capacity", "capacity_unit")}
 
 
 @admin.register(ItemType)

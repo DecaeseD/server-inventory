@@ -9,4 +9,9 @@
 {% for d in page %}<tr><td>{{ d.pk }}</td><td><span class="badge badge-{{ d.status }}">{{ d.get_status_display }}</span></td>
 <td>{{ d.created_at|date:"Y/m/d H:i" }}</td><td>{{ d.reject_reason|truncatechars:60 }}</td><td><a href="{% url 'panels:document' d.pk %}">جزئیات</a></td></tr>
 {% empty %}<tr><td colspan="5" class="muted">درخواستی ثبت نشده است.</td></tr>{% endfor %}</table>{% include "panels/_pager.html" %}</div>
+{% if my_changes %}<div class="card"><h2>درخواست‌های ویرایش من</h2>
+{% for cr in my_changes %}<div style="margin-bottom:12px"><b>{% if cr.unit %}<a href="{% url 'panels:unit' cr.unit_id %}">{{ cr.unit }}</a>{% else %}<a href="{% url 'panels:item' cr.item_type_id %}">{{ cr.item_type.name }}</a>{% endif %}</b>
+ <span class="badge badge-{{ cr.status }}">{{ cr.get_status_display }}</span> <span class="muted">{{ cr.created_at|date:"Y/m/d H:i" }}</span>
+ {% if cr.reject_reason %}<span class="err"> دلیل رد: {{ cr.reject_reason }}</span>{% endif %}
+ {% include "panels/_changes.html" %}</div>{% endfor %}</div>{% endif %}
 {% endblock %}

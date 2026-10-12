@@ -16,7 +16,7 @@ from django.utils import timezone
 from audit.models import record
 from catalog.models import ItemType
 
-from .models import (OPERATION_MOVES, PRICED_OPERATIONS, SERVER_OPERATIONS, Bucket,
+from .models import (OPERATION_MOVES, PRICED_OPERATIONS, SERVER_OPERATIONS, Bucket, ChangeRequest,
                      InventorySettings, LedgerEntry, Operation, StockDocument, StockLine, Unit,
                      UnitStatus)
 
@@ -31,6 +31,14 @@ class InventoryError(Exception):
 def _require_perm(user, perm):
     if user is None or not user.is_active or not user.has_perm(perm):
         raise PermissionDenied("شما مجوز انجام این عملیات را ندارید.")
+
+
+def may_self_approve(user, cfg=None):
+    """Superusers and the top role («مدیر کل») may approve what they registered themselves.
+    For everybody else the global setting decides."""
+    cfg = cfg or InventorySettings.get()
+    return bool(cfg.allow_self_approval or user.is_superuser
+                or user.groups.filter(name="مدیر کل").exists())
 
 
 # ---------------------------------------------------------------- balances
@@ -439,7 +447,7 @@ def approve_document(document_id, user, ip=None):
         if doc.status != StockDocument.Status.PENDING:
             raise InventoryError("فقط درخواست‌های در انتظار تأیید قابل تأیید هستند.")
         cfg = InventorySettings.get()
-        if doc.created_by_id == user.pk and not cfg.allow_self_approval:
+        if doc.created_by_id == user.pk and not may_self_approve(user, cfg):
             raise InventoryError("ثبت‌کننده نمی‌تواند درخواست خودش را تأیید کند.")
         lines = list(doc.lines.select_related("item_type", "from_location", "to_location")
                      .order_by("pk"))
@@ -467,6 +475,16 @@ def reject_document(document_id, user, reason, ip=None):
         record(user=user, action="document_rejected", obj_type="StockDocument", obj_id=doc.pk,
                document_id=doc.pk, reason=reason, ip=ip)
     return doc
+
+
+def _line_idents(line):
+    """Current identifiers of the pieces a line really moved (from the ledger, so a later serial
+    edit cannot break voiding); falls back to the serials typed on the line."""
+    units = {}
+    for e in (LedgerEntry.objects.filter(line=line, unit__isnull=False)
+              .select_related("unit").order_by("id")):
+        units.setdefault(e.unit_id, e.unit)
+    return [u.ident for u in units.values()] or list(line.serials or [])
 
 
 def void_document(document_id, user, reason, ip=None):
@@ -501,7 +519,7 @@ def void_document(document_id, user, reason, ip=None):
                 quantity=l.quantity, unit_price=l.unit_price,
                 from_bucket=l.to_bucket, to_bucket=l.from_bucket,
                 from_location=l.to_location, to_location=l.from_location,
-                server=l.server, server_serial=l.server_serial, serials=l.serials,
+                server=l.server, server_serial=l.server_serial, serials=_line_idents(l),
                 note=f"معکوس قلم #{l.pk}"))
         _execute(rev, rev_lines, cfg)
         rev.status = StockDocument.Status.APPROVED
@@ -512,3 +530,151 @@ def void_document(document_id, user, reason, ip=None):
         record(user=user, action="document_voided", obj_type="StockDocument", obj_id=orig.pk,
                document_id=orig.pk, reason=reason, after={"reversal": rev.pk}, ip=ip)
     return rev
+
+
+# ---------------------------------------------------------------- edits (need approval)
+UNIT_FIELDS = {"serial_number": "شماره سریال", "label": "برچسب"}
+ITEM_FIELDS = {"name": "نام کالا", "category": "دسته‌بندی", "brand": "برند", "model_name": "مدل",
+               "sku": "کد کالا", "description": "توضیحات", "unit_label": "واحد شمارش",
+               "min_stock": "حداقل موجودی", "capacity": "ظرفیت هر عدد", "capacity_unit": "واحد ظرفیت",
+               "is_active": "فعال"}
+
+
+def _norm(field, v):
+    if field == "category":
+        return getattr(v, "pk", v)
+    if field == "capacity":
+        return None if v in (None, "") else f"{Decimal(str(v)):.2f}"
+    if field in ("serial_number",):
+        v = (v or "").strip()
+        return v or None
+    if field in ("min_stock",):
+        return int(v or 0)
+    if field == "is_active":
+        return bool(v)
+    return (v or "").strip() if isinstance(v, str) or v is None else v
+
+
+def _show(field, v):
+    if v is None or v == "":
+        return "—"
+    if field == "category":
+        from catalog.models import Category
+        c = Category.objects.filter(pk=v).first()
+        return c.name if c else str(v)
+    if field == "is_active":
+        return "فعال" if v else "غیرفعال"
+    return str(v)
+
+
+def _build_changes(*, unit=None, item=None, new_values):
+    from catalog.models import Category
+    target, labels = (unit, UNIT_FIELDS) if unit is not None else (item, ITEM_FIELDS)
+    changes = {}
+    for f, label in labels.items():
+        if f not in new_values:
+            continue
+        old = _norm(f, getattr(target, f + "_id") if f == "category" else getattr(target, f))
+        new = _norm(f, new_values[f])
+        if old != new:
+            changes[f] = {"label": label, "old": old, "new": new,
+                          "old_display": _show(f, old), "new_display": _show(f, new)}
+    if not changes:
+        raise InventoryError("هیچ تغییری نسبت به مقدار فعلی وارد نشده است.")
+    # ---- rules
+    if unit is not None:
+        it = unit.item_type
+        if "serial_number" in changes:
+            new = changes["serial_number"]["new"]
+            if new is None and (it.is_server or it.tracking_mode == ItemType.Tracking.SERIAL):
+                raise InventoryError("شماره سریال این کالا نمی‌تواند خالی باشد.")
+            if new is not None and Unit.objects.filter(item_type=it, serial_number=new).exclude(pk=unit.pk).exists():
+                raise InventoryError(f"سریال {new} برای «{it.name}» قبلاً ثبت شده است.")
+    else:
+        if "name" in changes and not changes["name"]["new"]:
+            raise InventoryError("نام کالا نمی‌تواند خالی باشد.")
+        if "category" in changes and not Category.objects.filter(pk=changes["category"]["new"]).exists():
+            raise InventoryError("دسته‌بندی نامعتبر است.")
+        if changes.get("min_stock", {}).get("new", 0) < 0:
+            raise InventoryError("حداقل موجودی نمی‌تواند منفی باشد.")
+        probe = ItemType.objects.get(pk=item.pk)
+        for f, c in changes.items():
+            if f == "category":
+                probe.category_id = c["new"]
+            elif f == "capacity":
+                probe.capacity = None if c["new"] is None else Decimal(c["new"])
+            else:
+                setattr(probe, f, c["new"])
+        try:
+            probe.clean()
+        except Exception as e:  # ValidationError
+            raise InventoryError(" ".join(getattr(e, "messages", [str(e)])))
+    return changes
+
+
+def create_change_request(*, user, unit=None, item=None, new_values, note=""):
+    _require_perm(user, "inventory.submit_document")
+    if (unit is None) == (item is None):
+        raise InventoryError("هدف ویرایش مشخص نیست.")
+    pending = ChangeRequest.objects.filter(status=ChangeRequest.Status.PENDING,
+                                           unit=unit, item_type=item)
+    if pending.exists():
+        raise InventoryError(f"یک درخواست ویرایش در انتظار تأیید برای همین مورد وجود دارد (#{pending.first().pk}).")
+    changes = _build_changes(unit=unit, item=item, new_values=new_values)
+    with transaction.atomic():
+        cr = ChangeRequest.objects.create(unit=unit, item_type=item, changes=changes, note=note[:255],
+                                          created_by=user)
+        record(user=user, action="change_created", obj_type="ChangeRequest", obj_id=cr.pk, after=changes)
+    return cr
+
+
+def approve_change(change_id, user, ip=None):
+    from catalog.models import Category
+    _require_perm(user, "inventory.approve_document")
+    with transaction.atomic():
+        cr = ChangeRequest.objects.select_for_update().get(pk=change_id)
+        if cr.status != ChangeRequest.Status.PENDING:
+            raise InventoryError("فقط درخواست‌های در انتظار تأیید قابل تأیید هستند.")
+        if cr.created_by_id == user.pk and not may_self_approve(user):
+            raise InventoryError("ثبت‌کننده نمی‌تواند درخواست خودش را تأیید کند.")
+        target = Unit.objects.select_for_update().get(pk=cr.unit_id) if cr.unit_id else \
+            ItemType.objects.select_for_update().get(pk=cr.item_type_id)
+        # the world may have changed since the request: re-validate against the current values
+        for f, c in cr.changes.items():
+            cur = _norm(f, getattr(target, f + "_id") if f == "category" else getattr(target, f))
+            if cur != c["old"]:
+                raise InventoryError(f"مقدار «{c['label']}» بعد از ثبت درخواست تغییر کرده است؛ این درخواست را رد و دوباره ثبت کنید.")
+        _build_changes(unit=target if cr.unit_id else None, item=target if cr.item_type_id else None,
+                       new_values={f: c["new"] for f, c in cr.changes.items()})
+        for f, c in cr.changes.items():
+            v = c["new"]
+            if f == "category":
+                target.category = Category.objects.get(pk=v)
+            elif f == "capacity":
+                target.capacity = None if v is None else Decimal(v)
+            else:
+                setattr(target, f, v)
+        target.save()
+        cr.status, cr.decided_by, cr.decided_at = ChangeRequest.Status.APPROVED, user, timezone.now()
+        cr.save(update_fields=["status", "decided_by", "decided_at"])
+        record(user=user, action="change_approved", obj_type="ChangeRequest", obj_id=cr.pk, ip=ip,
+               before={f: c["old"] for f, c in cr.changes.items()},
+               after={f: c["new"] for f, c in cr.changes.items()})
+    return cr
+
+
+def reject_change(change_id, user, reason, ip=None):
+    _require_perm(user, "inventory.approve_document")
+    reason = (reason or "").strip()
+    if not reason:
+        raise InventoryError("ثبت دلیل رد الزامی است.")
+    with transaction.atomic():
+        cr = ChangeRequest.objects.select_for_update().get(pk=change_id)
+        if cr.status != ChangeRequest.Status.PENDING:
+            raise InventoryError("فقط درخواست‌های در انتظار تأیید قابل رد هستند.")
+        cr.status, cr.decided_by, cr.decided_at, cr.reject_reason = (
+            ChangeRequest.Status.REJECTED, user, timezone.now(), reason)
+        cr.save(update_fields=["status", "decided_by", "decided_at", "reject_reason"])
+        record(user=user, action="change_rejected", obj_type="ChangeRequest", obj_id=cr.pk,
+               reason=reason, ip=ip)
+    return cr

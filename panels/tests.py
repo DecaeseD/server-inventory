@@ -155,7 +155,7 @@ class PanelTests(TestCase):
         S.approve_document(d2.pk, self.manager)
         self.login(self.keeper)
         r = self.client.get(reverse("panels:unit", args=[srv.pk]))
-        self.assertContains(r, "CPU"); self.assertContains(r, "سخت‌افزار این سرور")
+        self.assertContains(r, "CPU"); self.assertContains(r, "مشخصات سخت‌افزاری")
 
 
 import json
@@ -452,3 +452,157 @@ class RequestFormHardwareTests(TestCase):
         self.assertEqual(S.find_inconsistencies(), [])
         page = self.client.get(reverse("panels:document", args=[doc.pk]))
         self.assertContains(page, "همراه سرور")
+
+
+class EditsAndServerPageTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        from accounts.apps import create_roles
+        from catalog.models import Category as C
+        create_roles(None)
+        c_srv, c_ram, c_disk = C.objects.create(name="Servers"), C.objects.create(name="RAM"), C.objects.create(name="Disk")
+        cls.srv_t = ItemType.objects.create(name="HP G10", category=c_srv, tracking_mode="serial", is_server=True)
+        cls.r32 = ItemType.objects.create(name="RAM 32", category=c_ram, tracking_mode="serial", capacity=32, capacity_unit="GB")
+        cls.r64 = ItemType.objects.create(name="RAM 64", category=c_ram, tracking_mode="serial", capacity=64, capacity_unit="GB")
+        cls.d6 = ItemType.objects.create(name="HDD 600", category=c_disk, capacity=600, capacity_unit="GB")
+        cls.main = Location.objects.create(name="main")
+        cls.keeper = User.objects.create_user("kp"); cls.keeper.groups.add(Group.objects.get(name="انباردار"))
+        cls.manager = User.objects.create_user("mg"); cls.manager.groups.add(Group.objects.get(name="مدیر کل"))
+
+    def setUp(self):
+        n = [0]
+        def go(*lines, user=None):
+            n[0] += 1
+            d = S.create_document(user=user or self.keeper, lines=list(lines), idempotency_key=f"e{n[0]}")
+            S.approve_document(d.pk, self.manager)
+        go(dict(item_type=self.srv_t, operation="purchase", quantity=1, to_location=self.main, serials=["SRV"]),
+           dict(item_type=self.r32, operation="purchase", quantity=3, to_location=self.main, serials=["A", "B", "C"]),
+           dict(item_type=self.r64, operation="purchase", quantity=1, to_location=self.main, serials=["BIG"]),
+           dict(item_type=self.d6, operation="purchase", quantity=2, to_location=self.main))
+        self.srv = Unit.objects.get(serial_number="SRV")
+        go(dict(item_type=self.r32, operation="install", quantity=2, from_location=self.main, server=self.srv, serials=["A", "B"]),
+           dict(item_type=self.d6, operation="install", quantity=2, from_location=self.main, server=self.srv))
+        self.client.force_login(self.keeper)
+
+    def approve_last(self):
+        S.approve_document(StockDocument.objects.latest("id").pk, self.manager)
+
+    # ---- server page
+    def test_server_page_shows_totals_and_actions(self):
+        r = self.client.get(reverse("panels:unit", args=[self.srv.pk]))
+        self.assertContains(r, "64GB")                 # 2 x RAM 32
+        self.assertContains(r, "1.2TB")                # 2 x 600GB
+        self.assertContains(r, "تعویض")
+        self.assertContains(r, "نصب سخت‌افزار")
+        self.assertContains(r, "ویرایش")
+
+    def test_remove_part(self):
+        a = Unit.objects.get(serial_number="A")
+        self.client.post(reverse("panels:server_action", args=[self.srv.pk]),
+                         dict(action="remove", units=[a.pk], location=self.main.pk))
+        self.approve_last()
+        a.refresh_from_db(); self.assertEqual(a.status, "free")
+        from inventory import specs
+        self.assertEqual(specs.server_specs(self.srv)[1]["totals"] if False else
+                         [g for g in specs.server_specs(self.srv) if g["name"] == "RAM"][0]["totals"], ["32GB"])
+
+    def test_replace_part(self):
+        a, big = Unit.objects.get(serial_number="A"), Unit.objects.get(serial_number="BIG")
+        r = self.client.post(reverse("panels:server_action", args=[self.srv.pk]),
+                             dict(action="replace", old=a.pk, new_units=[big.pk], location=self.main.pk))
+        doc = StockDocument.objects.latest("id")
+        self.assertRedirects(r, reverse("panels:document", args=[doc.pk]))
+        self.assertEqual(doc.lines.count(), 2)
+        self.approve_last()
+        from inventory import specs
+        ram = [g for g in specs.server_specs(self.srv) if g["name"] == "RAM"][0]
+        self.assertEqual(ram["totals"], ["96GB"])      # 32 + 64
+        a.refresh_from_db(); self.assertEqual(a.status, "free")
+
+    def test_install_from_stock_and_new_part(self):
+        c = Unit.objects.get(serial_number="C")
+        self.client.post(reverse("panels:server_action", args=[self.srv.pk]),
+                         dict(action="install_stock", units=[c.pk]))
+        self.approve_last()
+        self.assertEqual(S.get_balance(self.r32, "installed", server=self.srv), 3)
+        self.client.post(reverse("panels:server_action", args=[self.srv.pk]),
+                         dict(action="install_new", item=self.r64.pk, serials="N1", quantity=1))
+        self.approve_last()
+        self.assertEqual(S.get_balance(self.r64, "installed", server=self.srv), 1)
+        self.assertEqual(S.find_inconsistencies(), [])
+
+    def test_bad_server_actions_create_nothing(self):
+        before = StockDocument.objects.count()
+        url = reverse("panels:server_action", args=[self.srv.pk])
+        free = Unit.objects.get(serial_number="C")
+        a = Unit.objects.get(serial_number="A")
+        self.client.post(url, dict(action="remove", units=[a.pk]))                         # no location
+        self.client.post(url, dict(action="remove", units=[free.pk], location=self.main.pk))  # not installed
+        self.client.post(url, dict(action="install_stock", units=[a.pk]))                  # not free
+        self.client.post(url, dict(action="replace", old=free.pk, new_units=[], location=self.main.pk))
+        self.client.post(url, dict(action="install_new", item=self.r64.pk, quantity=0))
+        self.client.post(url, dict(action="nope"))
+        self.assertEqual(StockDocument.objects.count(), before)
+
+    # ---- edits
+    def test_edit_unit_goes_through_approval(self):
+        a = Unit.objects.get(serial_number="A")
+        r = self.client.post(reverse("panels:unit_edit", args=[a.pk]), dict(serial_number="A2", label="top", note="typo"))
+        self.assertEqual(r.status_code, 302)
+        a.refresh_from_db(); self.assertEqual(a.serial_number, "A")
+        self.assertContains(self.client.get(reverse("panels:unit", args=[a.pk])), "ویرایش در انتظار تأیید")
+        self.client.force_login(self.manager)
+        page = self.client.get(reverse("panels:approvals"))
+        self.assertContains(page, "A2")
+        from inventory.models import ChangeRequest
+        cr = ChangeRequest.objects.get()
+        self.client.post(reverse("panels:change_approve", args=[cr.pk]))
+        a.refresh_from_db(); self.assertEqual((a.serial_number, a.label), ("A2", "top"))
+
+    def test_edit_item_capacity_updates_server_totals(self):
+        self.client.post(reverse("panels:item_edit", args=[self.r32.pk]), dict(
+            name="RAM 32", category=self.r32.category_id, unit_label="عدد", min_stock=0,
+            capacity="16", capacity_unit="GB", is_active="on"))
+        from inventory.models import ChangeRequest
+        self.client.force_login(self.manager)
+        self.client.post(reverse("panels:change_approve", args=[ChangeRequest.objects.get().pk]))
+        self.assertContains(self.client.get(reverse("panels:unit", args=[self.srv.pk])), "32GB")
+
+    def test_edit_validation_and_reject(self):
+        a = Unit.objects.get(serial_number="A")
+        r = self.client.post(reverse("panels:unit_edit", args=[a.pk]), dict(serial_number="B", label=""))
+        self.assertContains(r, "قبلاً ثبت شده")
+        r = self.client.post(reverse("panels:unit_edit", args=[a.pk]), dict(serial_number="A", label=""))
+        self.assertContains(r, "هیچ تغییری")
+        self.client.post(reverse("panels:unit_edit", args=[a.pk]), dict(serial_number="A9", label=""))
+        from inventory.models import ChangeRequest
+        cr = ChangeRequest.objects.get()
+        self.client.force_login(self.manager)
+        self.client.post(reverse("panels:change_reject", args=[cr.pk]), dict(reason="خیر"))
+        cr.refresh_from_db(); self.assertEqual(cr.status, "rejected")
+
+    def test_keeper_cannot_decide_changes(self):
+        a = Unit.objects.get(serial_number="A")
+        self.client.post(reverse("panels:unit_edit", args=[a.pk]), dict(serial_number="A9", label=""))
+        from inventory.models import ChangeRequest
+        r = self.client.post(reverse("panels:change_approve", args=[ChangeRequest.objects.get().pk]))
+        self.assertEqual(r.status_code, 403)
+
+    # ---- misc
+    def test_admin_approves_own_request_through_the_panel(self):
+        self.client.force_login(self.manager)
+        self.client.post(reverse("panels:new_request"), formset([dict(
+            item_type=self.d6.pk, operation="purchase", quantity=1, to_location=self.main.pk)], key="mine"))
+        doc = StockDocument.objects.get(idempotency_key="mine")
+        r = self.client.post(reverse("panels:approve", args=[doc.pk]), follow=True)
+        doc.refresh_from_db(); self.assertEqual(doc.status, "approved")
+
+    def test_items_list_has_show_button(self):
+        r = self.client.get(reverse("panels:items"))
+        self.assertContains(r, ">نمایش</a>")
+        self.assertContains(r, reverse("panels:item", args=[self.r32.pk]))
+
+    def test_server_item_page_lists_hardware_summary(self):
+        r = self.client.get(reverse("panels:item", args=[self.srv_t.pk]))
+        self.assertContains(r, "RAM 64GB")
+        self.assertContains(r, "Disk 1.2TB")

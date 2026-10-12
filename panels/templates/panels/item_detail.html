@@ -5,7 +5,9 @@
   <h1>{{ item.name }} <span class="muted" style="font-size:15px;font-weight:400">{{ item.brand }} {{ item.model_name }}</span></h1>
   <p class="sub" style="margin:0">دسته: {{ item.category.name }} · رهگیری: {{ item.get_tracking_mode_display }} · واحد: {{ item.unit_label }}{% if item.is_server %} · <span class="badge badge-installed">سرور کامل</span>{% endif %}{% if item.min_stock %} · حداقل موجودی: {{ item.min_stock }}{% endif %}</p>
 </div>
-{% if perms.inventory.submit_document %}<a class="btn" href="{% url 'panels:new_request' %}">+ ثبت درخواست</a>{% endif %}</div>
+<div style="display:flex;gap:8px">{% if can_edit %}<a class="btn sec" href="{% url 'panels:item_edit' item.pk %}">✎ ویرایش کالا (نیاز به تأیید)</a>{% endif %}{% if perms.inventory.submit_document %}<a class="btn" href="{% url 'panels:new_request' %}">+ ثبت درخواست</a>{% endif %}</div></div>
+{% if pending_change %}<div class="banner"><b>ویرایش در انتظار تأیید (#{{ pending_change.pk }}):</b>{% include "panels/_changes.html" with cr=pending_change %}</div>{% endif %}
+{% if item.capacity %}<p class="sub">ظرفیت هر عدد: <b class="num">{{ item.capacity|floatformat:"-2" }} {{ item.get_capacity_unit_display }}</b></p>{% endif %}
 {% if item.description or item.attributes.all %}<div class="card">
   {% if item.description %}<p style="margin-top:0">{{ item.description }}</p>{% endif %}
   {% if item.attributes.all %}<p style="margin-bottom:0">{% for a in item.attributes.all %}<span class="badge">{{ a.definition.name }}: {{ a.value }}</span> {% endfor %}</p>{% endif %}
@@ -24,13 +26,15 @@
    {% for v,l in unit_statuses %}<option value="{{ v }}" {% if request.GET.ustatus == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>
   <div><button class="btn sec">فیلتر</button></div></form>
 <form method="post" action="{% url 'panels:unit_action' item.pk %}" id="unit-form">{% csrf_token %}
-<div class="tw"><table><tr>{% if can_act %}<th class="chk"><input type="checkbox" id="all"></th>{% endif %}<th>کد داخلی</th><th>سریال</th><th>وضعیت</th><th>محل / نصب روی</th><th></th></tr>
+<div class="tw"><table><tr>{% if can_act %}<th class="chk"><input type="checkbox" id="all"></th>{% endif %}<th>کد داخلی</th><th>سریال</th><th>وضعیت</th><th>محل / نصب روی</th>{% if item.is_server %}<th>سخت‌افزار</th>{% endif %}<th></th></tr>
 {% for u in units %}<tr>{% if can_act %}<td class="chk">{% if u.status == "installed" or u.status == "free" %}<input type="checkbox" name="units" value="{{ u.pk }}" class="pick" data-status="{{ u.status }}">{% endif %}</td>{% endif %}
  <td class="code">{{ u.asset_code|default:"—" }}</td><td class="code">{{ u.serial_number|default:"—" }}</td>
  <td><span class="badge badge-{{ u.status }}">{{ u.get_status_display }}</span></td>
  <td>{% if u.installed_in %}<a href="{% url 'panels:unit' u.installed_in.pk %}">{{ u.installed_in.item_type.name }} <span class="code">{{ u.installed_in.serial_number }}</span></a>{% else %}{{ u.location|default:"—" }}{% endif %}</td>
- <td><a href="{% url 'panels:unit' u.pk %}">جزئیات</a></td></tr>
-{% empty %}<tr><td colspan="6" class="muted">نمونه‌ای یافت نشد.</td></tr>{% endfor %}</table></div>
+ {% if item.is_server %}<td class="muted" style="font-size:13px">{{ u.hw_summary|default:"—" }}</td>{% endif %}
+ <td style="white-space:nowrap"><a class="btn sm ghost" href="{% url 'panels:unit' u.pk %}">نمایش</a>{% if can_edit %} <a class="btn sm ghost" href="{% url 'panels:unit_edit' u.pk %}">ویرایش</a>{% endif %}
+  {% if can_act and u.status == "installed" %} <button type="button" class="btn sm ghost quick-detach" data-id="{{ u.pk }}">جدا کردن</button>{% endif %}</td></tr>
+{% empty %}<tr><td colspan="7" class="muted">نمونه‌ای یافت نشد.</td></tr>{% endfor %}</table></div>
 {% include "panels/_pager_u.html" %}
 
 {% if can_act %}
@@ -67,6 +71,10 @@
   picks.forEach(function(p){p.addEventListener("change",upd);});
   if(all) all.addEventListener("change",function(){picks.forEach(function(p){p.checked=all.checked;});upd();});
   act.addEventListener("change",upd); upd();
+  document.querySelectorAll(".quick-detach").forEach(function(b){b.addEventListener("click",function(){
+    picks.forEach(function(p){p.checked=(p.value===b.dataset.id);}); act.value="uninstall"; upd();
+    document.getElementById("bar").scrollIntoView({behavior:"smooth",block:"center"});
+    document.querySelector("select[name=location]").focus();});});
   document.getElementById("unit-form").addEventListener("submit",function(e){
     if(!confirm("درخواست ثبت شود؟ تا تأیید مدیر روی موجودی اثری ندارد.")) e.preventDefault();});
 })();

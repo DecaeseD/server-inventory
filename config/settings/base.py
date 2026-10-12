@@ -17,9 +17,8 @@ _load_env(BASE_DIR / ".env")
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
 if not SECRET_KEY:
     raise RuntimeError("DJANGO_SECRET_KEY تنظیم نشده یا خالیه (فایل .env رو چک کن).")
-SECRET_KEY = os.environ["DJANGO_SECRET_KEY"]
 DEBUG = False
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h]
 
 INSTALLED_APPS = [
     "django.contrib.admin",

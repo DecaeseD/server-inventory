@@ -72,3 +72,41 @@ class LineForm(forms.Form):
                     unit_price=c.get("unit_price"), from_location=c.get("from_location"),
                     to_location=c.get("to_location"), server=server, server_serial=ss,
                     serials=serials, note=c.get("note", ""))
+
+
+class UnitEditForm(forms.Form):
+    serial_number = forms.CharField(label="شماره سریال", required=False, max_length=100,
+                                    widget=forms.TextInput(attrs={"dir": "ltr"}))
+    label = forms.CharField(label="برچسب", required=False, max_length=100)
+    note = forms.CharField(label="توضیح برای تأییدکننده", required=False, max_length=255)
+
+    def values(self):
+        c = self.cleaned_data
+        return {"serial_number": c["serial_number"], "label": c["label"]}
+
+
+class ItemEditForm(forms.Form):
+    name = forms.CharField(label="نام کالا", max_length=200)
+    category = forms.ModelChoiceField(label="دسته‌بندی", queryset=None)
+    brand = forms.CharField(label="برند", required=False, max_length=100)
+    model_name = forms.CharField(label="مدل", required=False, max_length=100)
+    sku = forms.CharField(label="کد کالا", required=False, max_length=64)
+    unit_label = forms.CharField(label="واحد شمارش", max_length=30)
+    min_stock = forms.IntegerField(label="حداقل موجودی آزاد", min_value=0)
+    capacity = forms.DecimalField(label="ظرفیت هر عدد", required=False, min_value=0, max_digits=12,
+                                  decimal_places=2, help_text="مثلاً ۳۲ برای رم ۳۲ گیگ (برای جمع‌زدن روی سرور)")
+    capacity_unit = forms.ChoiceField(label="واحد ظرفیت", required=False,
+                                      choices=[("", "—")] + list(ItemType.CapacityUnit.choices))
+    is_active = forms.BooleanField(label="فعال", required=False)
+    description = forms.CharField(label="توضیحات", required=False, widget=forms.Textarea(attrs={"rows": 3}))
+    note = forms.CharField(label="توضیح برای تأییدکننده", required=False, max_length=255)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from catalog.models import Category
+        self.fields["category"].queryset = Category.objects.order_by("name")
+
+    def values(self):
+        c = dict(self.cleaned_data)
+        c.pop("note", None)
+        return c

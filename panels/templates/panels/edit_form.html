@@ -1,0 +1,20 @@
+{% extends "panels/base.html" %}
+{% block title %}ویرایش{% endblock %}
+{% block content %}
+<div class="pagehead"><div><h1>ویرایش {% if kind == "unit" %}{{ obj }}{% else %}{{ obj.name }}{% endif %}</h1>
+<p class="sub" style="margin:0">تغییرات بعد از ثبت، <b>منتظر تأیید مدیر</b> می‌ماند و تا آن موقع اعمال نمی‌شود.</p></div>
+<a class="btn sec" href="{{ back }}">بازگشت</a></div>
+<form method="post" class="card" style="max-width:760px">{% csrf_token %}
+  {% if form.non_field_errors %}<div class="errbox">{{ form.non_field_errors|join:" " }}</div>{% endif %}
+  <div class="row2">
+  {% for f in form.visible_fields %}
+    <div class="fld {% if f.name == 'description' or f.name == 'note' %}wide{% endif %}" style="margin-bottom:10px">
+      <label for="{{ f.id_for_label }}">{{ f.label }}</label>{{ f }}
+      {% if f.help_text %}<div class="hint">{{ f.help_text }}</div>{% endif %}
+      {% for e in f.errors %}<div class="err">{{ e }}</div>{% endfor %}
+    </div>
+  {% endfor %}
+  </div>
+  <button class="btn">ثبت درخواست ویرایش</button>
+</form>
+{% endblock %}

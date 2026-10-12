@@ -24,3 +24,8 @@ Upgrade notes (v3):
       insufficient quantity are refused immediately, with the line number).
     * Issuing / reducing a complete server takes its installed parts with it (explicit child lines, voidable).
     * Manual test checklist: docs/TEST_CHECKLIST.md
+
+Upgrade notes (v4):
+    python manage.py migrate        # catalog 0002 (capacity), inventory 0004 (ChangeRequest)
+    * Set "ظرفیت هر عدد" + unit on RAM/disk/CPU items (admin or the item edit page) to get totals on servers.
+    * Edits of units/items are change requests that need approval; مدیر کل and superusers may approve their own.

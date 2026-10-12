@@ -108,16 +108,27 @@ class WorkflowTests(Base):
         self.assertEqual(self.stock(self.cpu), 0)
 
     def test_keeper_cannot_approve_and_no_self_approval(self):
+        from django.contrib.auth.models import Permission
         doc = self.submit(self.line(self.cpu, Operation.PURCHASE, 1, to_location=self.main))
         with self.assertRaises(PermissionDenied):
             S.approve_document(doc.pk, self.keeper)
-        mdoc = self.submit(self.line(self.cpu, Operation.PURCHASE, 1, to_location=self.main),
-                           user=self.manager) if self.manager.has_perm("inventory.submit_document") else None
-        self.assertIsNotNone(mdoc)
+        # a user who is not in the top role can approve but not their own request (until the setting allows)
+        mid = User.objects.create_user("mid")
+        mid.user_permissions.add(*Permission.objects.filter(codename__in=["submit_document", "approve_document"]))
+        mdoc = self.submit(self.line(self.cpu, Operation.PURCHASE, 1, to_location=self.main), user=mid)
         with self.assertRaises(S.InventoryError):
-            S.approve_document(mdoc.pk, self.manager)
+            S.approve_document(mdoc.pk, mid)
         cfg = InventorySettings.get(); cfg.allow_self_approval = True; cfg.save()
-        S.approve_document(mdoc.pk, self.manager)
+        S.approve_document(mdoc.pk, User.objects.get(pk=mid.pk))
+
+    def test_top_role_and_superuser_can_approve_their_own_requests(self):
+        doc = self.submit(self.line(self.cpu, Operation.PURCHASE, 1, to_location=self.main), user=self.manager)
+        S.approve_document(doc.pk, self.manager)
+        self.assertEqual(self.stock(self.cpu), 1)
+        su = User.objects.create_superuser("root")
+        doc2 = self.submit(self.line(self.cpu, Operation.PURCHASE, 1, to_location=self.main), user=su)
+        S.approve_document(doc2.pk, su)
+        self.assertEqual(self.stock(self.cpu), 2)
 
     def test_accountant_has_no_implicit_permissions(self):
         with self.assertRaises(PermissionDenied):
@@ -532,3 +543,150 @@ class EveryPieceHasIdentityTests(Base):
         self.assertEqual(self.stock(self.cpu), 6)
         self.approve(self.line(self.cpu, Operation.ISSUE, 5, from_location=self.main))   # 3 identified + 2 legacy
         self.assertEqual(self.stock(self.cpu), 1)
+
+
+class SpecsTests(Base):
+    """RAM / CPU / disk totals on a server."""
+
+    def setUp(self):
+        from catalog.models import Category as C
+        cat = self.ram.category
+        self.c_ram = C.objects.create(name="RAM")
+        self.c_disk = C.objects.create(name="Disk")
+        self.c_cpu = C.objects.create(name="CPU")
+        self.c_ssd = C.objects.create(name="SSD", parent=self.c_disk)     # sub-category rolls up into Disk
+        mk = lambda n, c, cap, unit, **kw: ItemType.objects.create(name=n, category=c, capacity=cap, capacity_unit=unit, **kw)
+        self.r32 = mk("RAM 32", self.c_ram, 32, "GB")
+        self.r16 = mk("RAM 16", self.c_ram, 16, "GB")
+        self.d600 = mk("HDD 600", self.c_disk, 600, "GB")
+        self.d1t = mk("SSD 1T", self.c_ssd, 1, "TB")
+        self.xeon = mk("Xeon 8c", self.c_cpu, 8, "core")
+        self.plain = ItemType.objects.create(name="Cable", category=self.c_cpu)
+        self.buy_server("S1")
+        self.srv = Unit.objects.get(serial_number="S1")
+
+    def put(self, item, n):
+        self.approve(self.line(item, Operation.PURCHASE, n, to_location=self.main))
+        self.approve(self.line(item, Operation.INSTALL, n, from_location=self.main, server=self.srv))
+
+    def spec(self):
+        from . import specs
+        return {g["name"]: g for g in specs.server_specs(self.srv)}
+
+    def test_two_32gb_rams_make_64gb(self):
+        self.put(self.r32, 2)
+        g = self.spec()["RAM"]
+        self.assertEqual(g["totals"], ["64GB"])
+        self.assertEqual([(r["count"], r["label"], r["subtotal"]) for r in g["rows"]], [(2, "RAM 32GB", "64GB")])
+
+    def test_mixed_sizes_group_by_size_and_sum(self):
+        self.put(self.r32, 2); self.put(self.r16, 4)
+        g = self.spec()["RAM"]
+        self.assertEqual(g["totals"], ["128GB"])
+        self.assertEqual([(r["count"], r["subtotal"]) for r in g["rows"]], [(2, "64GB"), (4, "64GB")])
+
+    def test_disks_are_summed_across_subcategories_and_shown_in_tb(self):
+        self.put(self.d600, 2)
+        self.assertEqual(self.spec()["Disk"]["totals"], ["1.2TB"])
+        self.put(self.d1t, 5)                                  # SSD is a sub-category of Disk
+        g = self.spec()["Disk"]
+        self.assertEqual(g["totals"], ["6.2TB"])
+        self.assertEqual(g["count"], 7)
+
+    def test_cpu_cores_and_items_without_capacity(self):
+        self.put(self.xeon, 2); self.put(self.plain, 3)
+        g = self.spec()["CPU"]
+        self.assertEqual(g["totals"], ["16 هسته"])
+        self.assertEqual(g["uncounted"], 3)
+
+    def test_totals_follow_installs_and_removals(self):
+        self.put(self.r32, 2)
+        units = list(Unit.objects.filter(item_type=self.r32))
+        self.approve(self.line(self.r32, Operation.UNINSTALL, 1, to_location=self.main, server=self.srv,
+                               serials=[units[0].ident]))
+        self.assertEqual(self.spec()["RAM"]["totals"], ["32GB"])
+
+    def test_capacity_needs_unit(self):
+        it = ItemType(name="x", category=self.c_ram, capacity=8)
+        with self.assertRaises(ValidationError):
+            it.clean()
+
+
+class ChangeRequestTests(Base):
+    def setUp(self):
+        self.buy_server("OLD")
+        self.srv = Unit.objects.get(serial_number="OLD")
+
+    def req(self, **vals):
+        return S.create_change_request(user=self.keeper, unit=self.srv, new_values=vals)
+
+    def test_nothing_changes_before_approval(self):
+        cr = self.req(serial_number="NEW", label="rack 4")
+        self.srv.refresh_from_db()
+        self.assertEqual((self.srv.serial_number, cr.status), ("OLD", "pending"))
+        S.approve_change(cr.pk, self.manager)
+        self.srv.refresh_from_db()
+        self.assertEqual((self.srv.serial_number, self.srv.label), ("NEW", "rack 4"))
+
+    def test_no_op_and_duplicates_refused(self):
+        with self.assertRaises(S.InventoryError):
+            self.req(serial_number="OLD")
+        self.req(label="a")
+        with self.assertRaises(S.InventoryError):
+            self.req(label="b")
+
+    def test_serial_must_stay_unique_and_present(self):
+        self.buy_server("OTHER")
+        with self.assertRaises(S.InventoryError):
+            self.req(serial_number="OTHER")
+        with self.assertRaises(S.InventoryError):
+            self.req(serial_number="")
+
+    def test_keeper_cannot_approve_but_manager_can_approve_own(self):
+        cr = self.req(label="x")
+        with self.assertRaises(PermissionDenied):
+            S.approve_change(cr.pk, self.keeper)
+
+        S.reject_change(cr.pk, self.manager, "no")
+        cr2 = S.create_change_request(user=self.manager, unit=self.srv, new_values={"label": "y"})
+        S.approve_change(cr2.pk, self.manager)             # top role approves its own edit
+        self.srv.refresh_from_db(); self.assertEqual(self.srv.label, "y")
+
+    def test_reject_needs_reason_and_changes_nothing(self):
+        cr = self.req(label="x")
+        with self.assertRaises(S.InventoryError):
+            S.reject_change(cr.pk, self.manager, " ")
+        S.reject_change(cr.pk, self.manager, "نه")
+        self.srv.refresh_from_db(); self.assertEqual(self.srv.label, "")
+        self.req(label="again")                              # a new request is possible after a rejection
+
+    def test_stale_request_is_refused_at_approval(self):
+        cr = self.req(label="x")
+        Unit.objects.filter(pk=self.srv.pk).update(label="changed elsewhere")
+        with self.assertRaises(S.InventoryError):
+            S.approve_change(cr.pk, self.manager)
+
+    def test_item_edit_incl_capacity(self):
+        cr = S.create_change_request(user=self.keeper, item=self.ram, new_values={
+            "name": "RAM 32GB DDR4", "capacity": "32", "capacity_unit": "GB", "min_stock": 3})
+        S.approve_change(cr.pk, self.manager)
+        self.ram.refresh_from_db()
+        self.assertEqual((self.ram.name, str(self.ram.capacity), self.ram.capacity_unit, self.ram.min_stock),
+                         ("RAM 32GB DDR4", "32.00", "GB", 3))
+        with self.assertRaises(S.InventoryError):            # capacity without unit
+            S.create_change_request(user=self.keeper, item=self.cpu, new_values={"capacity": "8"})
+
+    def test_audit_trail(self):
+        cr = self.req(label="x"); S.approve_change(cr.pk, self.manager)
+        acts = set(AuditEvent.objects.filter(object_type="ChangeRequest", object_id=str(cr.pk)).values_list("action", flat=True))
+        self.assertEqual(acts, {"change_created", "change_approved"})
+
+    def test_void_still_works_after_a_serial_edit(self):
+        doc = self.approve(self.line(self.ram, Operation.PURCHASE, 1, to_location=self.main, serials=["R1"]))
+        r1 = Unit.objects.get(serial_number="R1")
+        S.approve_change(S.create_change_request(user=self.keeper, unit=r1, new_values={"serial_number": "R1-FIXED"}).pk,
+                         self.manager)
+        S.void_document(doc.pk, self.manager, "x")
+        r1.refresh_from_db()
+        self.assertEqual((r1.status, r1.serial_number), (UnitStatus.OUT, "R1-FIXED"))
+        self.assertEqual(S.find_inconsistencies(), [])

@@ -1,3 +1,4 @@
+import re
 import uuid
 
 from django.contrib import messages
@@ -7,15 +8,17 @@ from django.core.paginator import Paginator
 from django.db.models import Count, F, Q, Sum
 from django.forms import formset_factory
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from catalog.models import Category, ItemType
 from inventory import services as S
+from inventory import specs
 from inventory.models import (OPERATION_MOVES, PRICED_OPERATIONS, SERVER_OPERATIONS, Bucket,
-                              LedgerEntry, Location, StockDocument, Unit, UnitStatus)
+                              ChangeRequest, LedgerEntry, Location, StockDocument, Unit, UnitStatus)
 
-from .forms import DocumentForm, LineForm
+from .forms import DocumentForm, ItemEditForm, LineForm, UnitEditForm
 
 
 def perm(p):
@@ -102,11 +105,17 @@ def item_detail(request, pk):
     legacy = {r["bucket"]: r["t"] for r in LedgerEntry.objects.filter(item_type=item, unit__isnull=True)
               .values("bucket").annotate(t=Sum("delta")) if r["t"]}
     can_act = request.user.has_perm("inventory.submit_document") and not item.is_server
+    page_units = paginate(request, units.order_by("serial_number", "pk"), 25, "upage")
+    if item.is_server:
+        for u in page_units:
+            u.hw_summary = specs.server_summary_line(u) if u.status != UnitStatus.OUT else ""
     return render(request, "panels/item_detail.html", {
+        "pending_change": item.change_requests.filter(status="pending").first(),
+        "can_edit": request.user.has_perm("inventory.submit_document"),
         "item": item,
         "summary": [(b.value, b.label, summary[b.value]) for b in Bucket],
         "free_by_location": _free_by_location(item),
-        "units": paginate(request, units.order_by("serial_number", "pk"), 25, "upage"),
+        "units": page_units,
         "history": paginate(request, history, 20, "page"),
         "unit_statuses": list(Unit._meta.get_field("status").choices),
         "legacy": [(dict(Bucket.choices).get(b, b), q) for b, q in legacy.items()],
@@ -123,20 +132,42 @@ def _free_by_location(item):
     return [r for r in rows if r["q"]]
 
 
+def _hardware_catalog():
+    """Everything the server page needs to pick hardware: root category -> items -> free units."""
+    from catalog.models import Category
+    cats = {c.pk: c for c in Category.objects.all()}
+    free = {}
+    for u in (Unit.objects.filter(status=UnitStatus.FREE, item_type__is_server=False, item_type__is_active=True)
+              .select_related("location").order_by("serial_number", "pk")):
+        free.setdefault(u.item_type_id, []).append({"id": u.pk, "ident": u.ident,
+                                                     "loc": u.location.name if u.location else "—"})
+    out = {}
+    for it in ItemType.objects.filter(is_server=False, is_active=True).order_by("name"):
+        root = specs.root_of(cats[it.category_id], cats)
+        cap = specs.fmt_capacity(it.capacity, it.capacity_unit) if it.capacity and it.capacity_unit else ""
+        out.setdefault(root.pk, {"name": root.name, "items": []})["items"].append({
+            "id": it.pk, "name": it.name, "cap": cap, "mode": it.tracking_mode, "free": free.get(it.pk, [])[:300]})
+    return sorted(out.values(), key=lambda c: c["name"])
+
+
 @perm("catalog.view_itemtype")
 def unit_detail(request, pk):
     unit = get_object_or_404(Unit.objects.select_related("item_type", "location", "installed_in"), pk=pk)
-    parts = (Unit.objects.filter(installed_in=unit).select_related("item_type")
-             .order_by("item_type__name", "serial_number", "pk"))
-    comps = []
-    for item_id, qty in S.components_of(unit):
-        it = ItemType.objects.get(pk=item_id)
-        mine = [u for u in parts if u.item_type_id == item_id]
-        comps.append({"item": it, "qty": qty, "units": mine, "unidentified": max(qty - len(mine), 0)})
     history = (LedgerEntry.objects.filter(Q(unit=unit) | Q(server=unit))
                .select_related("document", "line", "item_type", "location").order_by("-occurred_at", "-id"))
-    return render(request, "panels/unit_detail.html", {
-        "unit": unit, "components": comps, "history": paginate(request, history, 20)})
+    ctx = {"unit": unit, "history": paginate(request, history, 20),
+           "pending_change": unit.change_requests.filter(status="pending").first(),
+           "can_edit": request.user.has_perm("inventory.submit_document")}
+    if unit.item_type.is_server:
+        spec = specs.server_specs(unit)
+        ctx["specs"] = spec
+        ctx["unidentified"] = sum(max(r["count"] - len(r["units"]), 0) for g in spec for r in g["rows"])
+        active = unit.status not in (UnitStatus.OUT, UnitStatus.SCRAPPED)
+        ctx["can_act"] = request.user.has_perm("inventory.submit_document") and active
+        if ctx["can_act"]:
+            ctx["locations"] = Location.objects.filter(is_active=True).order_by("name")
+            ctx["hw_catalog"] = _hardware_catalog()
+    return render(request, "panels/unit_detail.html", ctx)
 
 
 # ---------------------------------------------------------------- creating requests
@@ -199,6 +230,8 @@ def my_requests(request):
     if request.GET.get("status") in StockDocument.Status.values:
         qs = qs.filter(status=request.GET["status"])
     return render(request, "panels/my_requests.html", {
+        "my_changes": ChangeRequest.objects.filter(created_by=request.user).select_related(
+            "unit", "unit__item_type", "item_type")[:10],
         "page": paginate(request, qs.order_by("-id")),
         "statuses": StockDocument.Status.choices})
 
@@ -265,6 +298,136 @@ def unit_action(request, pk):
         return back
     messages.success(request, f"درخواست #{doc.pk} ثبت شد و منتظر تأیید مدیر است.")
     return redirect("panels:document", doc.pk)
+
+
+@require_POST
+@perm("inventory.submit_document")
+def server_action(request, pk):
+    """Remove / replace / install hardware on ONE server. Always a pending request."""
+    server = get_object_or_404(Unit.objects.select_related("item_type"), pk=pk, item_type__is_server=True)
+    back = redirect("panels:unit", pk)
+    P = request.POST
+    action = P.get("action")
+    loc = Location.objects.filter(pk=P.get("location") or 0, is_active=True).first()
+
+    def picked(status):
+        us = list(Unit.objects.filter(pk__in=P.getlist("units"), item_type__is_server=False)
+                  .select_related("item_type", "location", "installed_in").order_by("pk"))
+        if not us:
+            raise S.InventoryError("هیچ قطعه‌ای انتخاب نشده است.")
+        if any(u.status != status for u in us):
+            raise S.InventoryError("وضعیت قطعه‌های انتخاب‌شده برای این عملیات معتبر نیست.")
+        return us
+
+    def by_item(us, key):
+        g = {}
+        for u in us:
+            g.setdefault((u.item_type, key(u)), []).append(u)
+        return g
+
+    try:
+        lines = []
+        if action == "remove":
+            us = picked(UnitStatus.INSTALLED)
+            if any(u.installed_in_id != server.pk for u in us):
+                raise S.InventoryError("بعضی قطعه‌ها روی این سرور نیستند.")
+            if loc is None:
+                raise S.InventoryError("انبار مقصد را انتخاب کن.")
+            for (it, _), grp in by_item(us, lambda u: 0).items():
+                lines.append(dict(item_type=it, operation="uninstall", quantity=len(grp), to_location=loc,
+                                  server=server, serials=[u.ident for u in grp]))
+        elif action == "install_stock":
+            us = picked(UnitStatus.FREE)
+            for (it, place), grp in by_item(us, lambda u: u.location).items():
+                lines.append(dict(item_type=it, operation="install", quantity=len(grp), from_location=place,
+                                  server=server, serials=[u.ident for u in grp]))
+        elif action == "install_new":
+            it = get_object_or_404(ItemType, pk=P.get("item") or 0, is_server=False)
+            serials = [x.strip() for x in re.split(r"[\n,،]+", P.get("serials", "")) if x.strip()]
+            qty = len(serials) or int(P.get("quantity") or 0)
+            price = P.get("unit_price") or None
+            lines.append(dict(item_type=it, operation="enter_installed", quantity=qty, server=server,
+                              serials=serials, unit_price=price if request.user.has_perm("inventory.view_prices") else None))
+        elif action == "replace":
+            old = picked_old = Unit.objects.filter(pk=P.get("old") or 0, installed_in=server,
+                                                   status=UnitStatus.INSTALLED).select_related("item_type").first()
+            if old is None:
+                raise S.InventoryError("قطعهٔ قدیمی روی این سرور پیدا نشد.")
+            if loc is None:
+                raise S.InventoryError("انبار مقصد برای قطعهٔ قدیمی را انتخاب کن.")
+            new = list(Unit.objects.filter(pk__in=P.getlist("new_units"), status=UnitStatus.FREE,
+                                           item_type__is_server=False).select_related("item_type", "location"))
+            if not new:
+                raise S.InventoryError("قطعهٔ جایگزین را از موجودی آزاد انتخاب کن.")
+            lines.append(dict(item_type=old.item_type, operation="uninstall", quantity=1, to_location=loc,
+                              server=server, serials=[old.ident]))
+            for (it, place), grp in by_item(new, lambda u: u.location).items():
+                lines.append(dict(item_type=it, operation="install", quantity=len(grp), from_location=place,
+                                  server=server, serials=[u.ident for u in grp]))
+        else:
+            raise S.InventoryError("عملیات نامعتبر است.")
+        doc = S.create_document(user=request.user, lines=lines, idempotency_key=uuid.uuid4().hex,
+                                note=P.get("note", "")[:500])
+    except (S.InventoryError, ValueError) as e:
+        messages.error(request, str(e) if isinstance(e, S.InventoryError) else "مقدار واردشده نامعتبر است.")
+        return back
+    messages.success(request, f"درخواست #{doc.pk} ثبت شد و منتظر تأیید مدیر است.")
+    return redirect("panels:document", doc.pk)
+
+
+# ---------------------------------------------------------------- edits (need approval)
+def _edit_view(request, *, obj, form_cls, initial, kind, back_name):
+    form = form_cls(request.POST or None, initial=initial)
+    if request.method == "POST" and form.is_valid():
+        kw = {"unit": obj} if kind == "unit" else {"item": obj}
+        try:
+            cr = S.create_change_request(user=request.user, new_values=form.values(),
+                                         note=form.cleaned_data.get("note", ""), **kw)
+        except S.InventoryError as e:
+            form.add_error(None, str(e))
+        else:
+            messages.success(request, f"درخواست ویرایش #{cr.pk} ثبت شد و پس از تأیید مدیر اعمال می‌شود.")
+            return redirect(back_name, obj.pk)
+    return render(request, "panels/edit_form.html", {"form": form, "obj": obj, "kind": kind,
+                                                     "back": reverse(back_name, args=[obj.pk])})
+
+
+@perm("inventory.submit_document")
+def unit_edit(request, pk):
+    unit = get_object_or_404(Unit.objects.select_related("item_type"), pk=pk)
+    return _edit_view(request, obj=unit, form_cls=UnitEditForm, kind="unit", back_name="panels:unit",
+                      initial={"serial_number": unit.serial_number or "", "label": unit.label})
+
+
+@perm("inventory.submit_document")
+def item_edit(request, pk):
+    item = get_object_or_404(ItemType, pk=pk)
+    init = {f: getattr(item, f) for f in ("name", "brand", "model_name", "sku", "unit_label", "min_stock",
+                                           "capacity", "capacity_unit", "is_active", "description")}
+    init["category"] = item.category_id
+    return _edit_view(request, obj=item, form_cls=ItemEditForm, kind="item", back_name="panels:item", initial=init)
+
+
+@require_POST
+@perm("inventory.approve_document")
+def change_approve(request, pk):
+    try:
+        S.approve_change(pk, request.user, ip=request.META.get("REMOTE_ADDR"))
+        messages.success(request, "ویرایش تأیید و اعمال شد.")
+    except S.InventoryError as e:
+        messages.error(request, str(e))
+    return redirect("panels:approvals")
+
+
+@require_POST
+@perm("inventory.approve_document")
+def change_reject(request, pk):
+    try:
+        S.reject_change(pk, request.user, request.POST.get("reason", ""), ip=request.META.get("REMOTE_ADDR"))
+        messages.success(request, "درخواست ویرایش رد شد.")
+    except S.InventoryError as e:
+        messages.error(request, str(e))
+    return redirect("panels:approvals")
 
 
 # ---------------------------------------------------------------- documents
@@ -337,6 +500,8 @@ def approvals(request):
     if request.GET.get("date_to"):
         qs = qs.filter(created_at__date__lte=request.GET["date_to"])
     return render(request, "panels/approvals.html", {
+        "changes": ChangeRequest.objects.filter(status="pending").select_related(
+            "unit", "unit__item_type", "item_type", "created_by"),
         "page": paginate(request, qs.order_by("-id")),
         "statuses": StockDocument.Status.choices, "status": status,
         "pending_count": StockDocument.objects.filter(status="pending").count()})

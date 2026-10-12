@@ -2,6 +2,21 @@
 {% block title %}تأیید درخواست‌ها{% endblock %}
 {% block content %}
 <h1>درخواست‌های انبار <span class="muted" style="font-size:14px">({{ pending_count }} در انتظار تأیید)</span></h1>
+{% if changes %}
+<div class="card"><h2>درخواست‌های ویرایش در انتظار تأیید ({{ changes|length }})</h2>
+{% for cr in changes %}
+ <div class="line" style="border-right-color:#e0a100">
+  <div class="head"><b>{% if cr.unit %}<a href="{% url 'panels:unit' cr.unit_id %}">{{ cr.unit }}</a>{% else %}<a href="{% url 'panels:item' cr.item_type_id %}">{{ cr.item_type.name }}</a> <span class="badge">کالا</span>{% endif %}</b>
+   <span class="muted">ثبت: {{ cr.created_by.get_username }} · {{ cr.created_at|date:"Y/m/d H:i" }}</span><span class="sp"></span></div>
+  {% if cr.note %}<p class="muted" style="margin:0 0 8px">{{ cr.note }}</p>{% endif %}
+  {% include "panels/_changes.html" %}
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:flex-end">
+   <form method="post" action="{% url 'panels:change_approve' cr.pk %}" onsubmit="return confirm('این ویرایش اعمال شود؟')">{% csrf_token %}<button class="btn ok sm">تأیید</button></form>
+   <form method="post" action="{% url 'panels:change_reject' cr.pk %}" style="display:flex;gap:6px">{% csrf_token %}<input name="reason" placeholder="دلیل رد" required style="width:220px"><button class="btn bad sm">رد</button></form>
+  </div>
+ </div>
+{% endfor %}</div>
+{% endif %}
 <form class="card filters" method="get">
  <div><label>وضعیت</label><select name="status"><option value="all" {% if status == "all" %}selected{% endif %}>همه</option>
  {% for v,l in statuses %}<option value="{{ v }}" {% if status == v %}selected{% endif %}>{{ l }}</option>{% endfor %}</select></div>

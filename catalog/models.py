@@ -33,6 +33,15 @@ class ItemType(models.Model):
     is_server = models.BooleanField("سرور کامل است", default=False,
                                     help_text="فقط نمونه‌های این نوع می‌توانند میزبان قطعه باشند.")
     sku = models.CharField("کد کالا (اختیاری)", max_length=64, blank=True)
+    class CapacityUnit(models.TextChoices):
+        MB = "MB", "MB"
+        GB = "GB", "GB"
+        TB = "TB", "TB"
+        CORE = "core", "هسته"
+
+    capacity = models.DecimalField("ظرفیت هر عدد", max_digits=12, decimal_places=2, null=True, blank=True,
+                                   help_text="مثلاً ۳۲ برای رم ۳۲ گیگ؛ برای جمع‌زدن مقدار کل روی سرور استفاده می‌شود.")
+    capacity_unit = models.CharField("واحد ظرفیت", max_length=8, choices=CapacityUnit.choices, blank=True)
     min_stock = models.PositiveIntegerField("حداقل موجودی آزاد", default=0)
     is_active = models.BooleanField("فعال", default=True)
 
@@ -53,6 +62,10 @@ class ItemType(models.Model):
     def clean(self):
         if self.is_server and self.tracking_mode == self.Tracking.QUANTITY:
             raise ValidationError("سرور باید سریالی (یا هر دو) رهگیری شود.")
+        if bool(self.capacity) != bool(self.capacity_unit):
+            raise ValidationError("ظرفیت و واحد ظرفیت باید هر دو پر شوند یا هر دو خالی باشند.")
+        if self.capacity is not None and self.capacity <= 0:
+            raise ValidationError("ظرفیت باید بزرگتر از صفر باشد.")
 
     def save(self, *args, **kwargs):
         # Identity-level changes are blocked once the item has any history.

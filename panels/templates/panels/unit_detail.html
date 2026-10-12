@@ -4,15 +4,110 @@
 <div class="pagehead"><div><h1>{{ unit.item_type.name }} <span class="code">{{ unit.serial_number|default:unit.asset_code }}</span></h1>
 <p class="sub" style="margin:0">کالا: <a href="{% url 'panels:item' unit.item_type_id %}">{{ unit.item_type.name }}</a> · وضعیت: <span class="badge badge-{{ unit.status }}">{{ unit.get_status_display }}</span>
 · {% if unit.installed_in %}نصب‌شده روی <a href="{% url 'panels:unit' unit.installed_in_id %}">{{ unit.installed_in }}</a>{% else %}محل: {{ unit.location|default:"—" }}{% endif %}
-{% if unit.asset_code %} · کد داخلی: <span class="code">{{ unit.asset_code }}</span>{% endif %}</p></div></div>
+{% if unit.asset_code %} · کد داخلی: <span class="code">{{ unit.asset_code }}</span>{% endif %}{% if unit.label %} · برچسب: {{ unit.label }}{% endif %}</p></div>
+{% if can_edit %}<a class="btn sec" href="{% url 'panels:unit_edit' unit.pk %}">✎ ویرایش (نیاز به تأیید)</a>{% endif %}</div>
+{% if pending_change %}<div class="banner"><b>ویرایش در انتظار تأیید (#{{ pending_change.pk }}):</b>{% include "panels/_changes.html" with cr=pending_change %}</div>{% endif %}
+
 {% if unit.item_type.is_server %}
-<div class="card"><h2>سخت‌افزار این سرور {% if unit.status != "free" and unit.status != "out" %}<span class="muted" style="font-size:13px;font-weight:400">(همراه سرور، در وضعیت «{{ unit.get_status_display }}»)</span>{% endif %}</h2>
-{% if components %}<div class="tw"><table><tr><th>قطعه</th><th>تعداد</th><th>شناسه‌ها</th></tr>
-{% for c in components %}<tr><td><a href="{% url 'panels:item' c.item.pk %}">{{ c.item.name }}</a></td><td class="num">{{ c.qty }}</td>
-<td>{% for p in c.units %}<a class="badge code" href="{% url 'panels:unit' p.pk %}">{{ p.serial_number|default:p.asset_code }}</a> {% endfor %}{% if c.unidentified %}<span class="muted">+ {{ c.unidentified }} بدون شناسه (ثبت قدیمی)</span>{% endif %}</td></tr>{% endfor %}</table></div>
-<p class="hint">برای جدا کردن یا انتقال قطعه، از صفحهٔ همان کالا (روی نام قطعه کلیک کن) استفاده کن.</p>
-{% else %}<p class="muted">قطعه‌ای نصب نشده است.</p>{% endif %}</div>
+<h2>مشخصات سخت‌افزاری</h2>
+{% if specs %}
+<div class="specs">
+{% for g in specs %}<div class="spec">
+  <h3><span>{{ g.name }} <span class="muted" style="font-weight:400;font-size:13px">({{ g.count }} عدد)</span></span>
+   {% if g.totals %}<span class="tot">{{ g.totals|join:" + " }}</span>{% endif %}</h3>
+  <ul>{% for r in g.rows %}<li><span><span class="num">{{ r.count }}</span> × {{ r.label }}</span>{% if r.subtotal %}<b>= {{ r.subtotal }}</b>{% else %}<span class="muted">ظرفیت تعریف نشده</span>{% endif %}</li>{% endfor %}</ul>
+  {% if g.uncounted %}<div class="hint" style="margin-top:6px">{{ g.uncounted }} عدد بدون ظرفیت تعریف‌شده در جمع نیامده (ظرفیت را در «ویرایش کالا» وارد کن).</div>{% endif %}
+</div>{% endfor %}
+</div>
+
+<form method="post" action="{% url 'panels:server_action' unit.pk %}" id="rm-form">{% csrf_token %}<input type="hidden" name="action" value="remove">
+<div class="card"><h2>تک‌تک قطعات نصب‌شده</h2>
+{% if unidentified %}<div class="legacy">{{ unidentified }} قطعه بدون شناسهٔ مستقل (ثبت قدیمی) در جدول نیست ولی در جمع‌ها هست.</div>{% endif %}
+<div class="tw"><table><tr>{% if can_act %}<th class="chk"></th>{% endif %}<th>دسته</th><th>قطعه</th><th>کد داخلی</th><th>سریال</th><th></th></tr>
+{% for g in specs %}{% for r in g.rows %}{% for u in r.units %}<tr>
+ {% if can_act %}<td class="chk"><input type="checkbox" name="units" value="{{ u.pk }}" class="pick"></td>{% endif %}
+ <td>{{ g.name }}</td><td><a href="{% url 'panels:item' u.item_type_id %}">{{ u.item_type.name }}</a>{% if u.item_type.capacity %} <span class="badge">{{ r.label }}</span>{% endif %}</td>
+ <td class="code">{{ u.asset_code|default:"—" }}</td><td class="code">{{ u.serial_number|default:"—" }}</td>
+ <td style="white-space:nowrap"><a href="{% url 'panels:unit' u.pk %}">جزئیات</a>{% if can_edit %} · <a href="{% url 'panels:unit_edit' u.pk %}">ویرایش</a>{% endif %}
+  {% if can_act %} <button type="button" class="btn sm ghost replace-btn" data-id="{{ u.pk }}" data-label="{{ u.item_type.name }} {{ u.serial_number|default:u.asset_code }}" data-cat="{{ g.name }}">تعویض</button>{% endif %}</td></tr>
+{% endfor %}{% endfor %}{% endfor %}</table></div>
+{% if can_act %}
+<div class="actionbar" id="bar" style="margin-top:12px"><div style="margin-bottom:8px"><span class="cnt" id="cnt">0</span> قطعه انتخاب شده — حذف از سرور و برگشت به انبار</div>
+ <div class="row"><div><label>انبار مقصد</label><select name="location"><option value="">— انتخاب —</option>{% for l in locations %}<option value="{{ l.pk }}">{{ l.name }}</option>{% endfor %}</select></div>
+ <div><button class="btn bad" id="go" disabled>ثبت درخواست حذف قطعات</button></div></div></div>
 {% endif %}
+</div></form>
+{% else %}<div class="card"><p class="muted" style="margin:0">قطعه‌ای روی این سرور نصب نیست.</p></div>{% endif %}
+
+{% if can_act %}
+<div class="card" id="replace-card" style="display:none"><h2>تعویض: <span id="rp-title"></span></h2>
+<form method="post" action="{% url 'panels:server_action' unit.pk %}" class="picker" data-name="new_units">{% csrf_token %}
+ <input type="hidden" name="action" value="replace"><input type="hidden" name="old" id="rp-old">
+ <div class="row2"><div><label>دستهٔ قطعهٔ جایگزین</label><select class="p-cat"></select></div>
+  <div><label>کالای جایگزین</label><select class="p-item"></select></div>
+  <div><label>قطعهٔ قدیمی برود به انبار</label><select name="location" required><option value="">— انتخاب —</option>{% for l in locations %}<option value="{{ l.pk }}">{{ l.name }}</option>{% endfor %}</select></div></div>
+ <div class="p-units pickunits"></div>
+ <p style="margin:12px 0 0"><button class="btn">ثبت درخواست تعویض</button> <button type="button" class="btn sec" onclick="document.getElementById('replace-card').style.display='none'">بستن</button></p>
+</form></div>
+
+<div class="card"><h2>نصب سخت‌افزار</h2>
+<form method="post" action="{% url 'panels:server_action' unit.pk %}" class="picker" data-name="units" id="inst-form">{% csrf_token %}
+ <input type="hidden" name="action" value="install_stock" id="inst-action">
+ <div class="row2"><div><label>۱) دستهٔ سخت‌افزار</label><select class="p-cat"></select></div>
+  <div><label>۲) کالا</label><select class="p-item" name="item"></select></div>
+  <div><label>۳) منبع</label><div style="display:flex;gap:16px;padding-top:6px"><label style="margin:0;color:var(--text)"><input type="radio" name="mode" value="stock" checked> از موجودی آزاد انبار</label>
+   <label style="margin:0;color:var(--text)"><input type="radio" name="mode" value="new"> قطعهٔ جدید (همراه سرور آمده)</label></div></div></div>
+ <div class="p-units pickunits"></div>
+ <div class="p-new row2 hide" style="margin-top:8px"><div><label>تعداد</label><input type="number" min="1" name="quantity" value="1"></div>
+  <div><label>سریال‌ها (اگر کالا سریالی است؛ هر سطر یکی)</label><textarea name="serials" rows="2" dir="ltr"></textarea></div>
+  {% if perms.inventory.view_prices %}<div><label>قیمت واحد</label><input type="number" min="0" step="0.01" name="unit_price"></div>{% endif %}</div>
+ <p style="margin:12px 0 0"><button class="btn">ثبت درخواست نصب</button></p>
+</form></div>
+{{ hw_catalog|json_script:"hw-data" }}
+<script>
+(function(){
+  var HW=JSON.parse(document.getElementById("hw-data").textContent);
+  function fill(sel,arr,ph){sel.innerHTML="";var o=document.createElement("option");o.value="";o.textContent=ph;sel.appendChild(o);
+    arr.forEach(function(x,i){var e=document.createElement("option");e.value=x.value;e.textContent=x.text;sel.appendChild(e);});}
+  function initPicker(form){
+    var cat=form.querySelector(".p-cat"), item=form.querySelector(".p-item"), box=form.querySelector(".p-units"), name=form.dataset.name;
+    fill(cat,HW.map(function(c,i){return {value:i,text:c.name};}),"— انتخاب —");
+    function items(){var c=HW[cat.value]; fill(item,c?c.items.map(function(it,i){return {value:it.id,text:it.name+(it.cap?" — "+it.cap:"")+" ("+it.free.length+" آزاد)"};}):[],"— انتخاب —"); units();}
+    function find(){var c=HW[cat.value]; if(!c) return null; return c.items.filter(function(it){return String(it.id)===item.value;})[0]||null;}
+    function units(){
+      box.innerHTML=""; var it=find(); if(!it) return;
+      var modeNew=form.querySelector("input[name=mode][value=new]"); if(modeNew&&modeNew.checked) return;
+      if(!it.free.length){box.innerHTML='<span class="muted">موجودی آزاد ندارد.</span>';return;}
+      var last=null;
+      it.free.forEach(function(u){
+        if(u.loc!==last){var h=document.createElement("div");h.className="loc";h.textContent="انبار: "+u.loc;box.appendChild(h);last=u.loc;}
+        var l=document.createElement("label");l.innerHTML='<input type="checkbox" name="'+name+'" value="'+u.id+'"> <span class="code"></span>';
+        l.querySelector(".code").textContent=u.ident;box.appendChild(l);});
+    }
+    cat.addEventListener("change",items); item.addEventListener("change",units);
+    form._reset=function(catName){var idx=-1;HW.forEach(function(c,i){if(c.name===catName)idx=i;});cat.value=idx>=0?idx:"";items();};
+    form._units=units;
+  }
+  document.querySelectorAll("form.picker").forEach(initPicker);
+  var inst=document.getElementById("inst-form");
+  inst.querySelectorAll("input[name=mode]").forEach(function(r){r.addEventListener("change",function(){
+    var isNew=inst.querySelector("input[name=mode][value=new]").checked;
+    document.getElementById("inst-action").value=isNew?"install_new":"install_stock";
+    inst.querySelector(".p-new").classList.toggle("hide",!isNew); inst._units();});});
+  document.querySelectorAll(".replace-btn").forEach(function(b){b.addEventListener("click",function(){
+    var card=document.getElementById("replace-card"), f=card.querySelector("form");
+    card.style.display="block"; document.getElementById("rp-old").value=b.dataset.id;
+    document.getElementById("rp-title").textContent=b.dataset.label; f._reset(b.dataset.cat);
+    card.scrollIntoView({behavior:"smooth",block:"center"});});});
+  var picks=[].slice.call(document.querySelectorAll(".pick")), cnt=document.getElementById("cnt"), go=document.getElementById("go");
+  function upd(){var n=picks.filter(function(p){return p.checked;}).length;if(cnt)cnt.textContent=n;if(go)go.disabled=!n;}
+  picks.forEach(function(p){p.addEventListener("change",upd);});
+  var rm=document.getElementById("rm-form"); if(rm) rm.addEventListener("submit",function(e){if(!confirm("درخواست ثبت شود؟ تا تأیید مدیر اعمال نمی‌شود."))e.preventDefault();});
+})();
+</script>
+{% endif %}
+{% endif %}
+
 <div class="card"><h2>تاریخچه</h2><div class="tw"><table><tr><th>تاریخ</th><th>عملیات</th><th>سند</th><th>کالا</th><th>وضعیت</th><th>تغییر</th></tr>
 {% for e in history %}<tr><td>{{ e.occurred_at|date:"Y/m/d H:i" }}</td><td>{{ e.line.get_operation_display }}</td><td><a href="{% url 'panels:document' e.document_id %}">#{{ e.document_id }}</a></td>
 <td>{{ e.item_type.name }}</td><td>{{ e.get_bucket_display }}</td><td class="{% if e.delta > 0 %}pos{% else %}neg{% endif %}">{{ e.delta|stringformat:"+d" }}</td></tr>

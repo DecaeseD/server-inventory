@@ -1,0 +1,2 @@
+<table class="difftbl"><tr><th>فیلد</th><th>مقدار فعلی</th><th>مقدار جدید</th></tr>
+{% for f,c in cr.changes.items %}<tr><td>{{ c.label }}</td><td class="muted">{{ c.old_display }}</td><td><b>{{ c.new_display }}</b></td></tr>{% endfor %}</table>

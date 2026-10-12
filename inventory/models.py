@@ -249,3 +249,41 @@ class LedgerEntry(AppendOnlyModel):
         verbose_name_plural = "دفتر موجودی"
         indexes = [models.Index(fields=["item_type", "bucket", "location", "server"]),
                    models.Index(fields=["occurred_at"])]
+
+
+class ChangeRequest(models.Model):
+    """An edit of a unit (serial / label) or of an item type, applied only after approval."""
+    class Status(models.TextChoices):
+        PENDING = "pending", "در انتظار تأیید"
+        APPROVED = "approved", "تأییدشده"
+        REJECTED = "rejected", "ردشده"
+
+    unit = models.ForeignKey(Unit, null=True, blank=True, on_delete=models.PROTECT,
+                             related_name="change_requests")
+    item_type = models.ForeignKey("catalog.ItemType", null=True, blank=True, on_delete=models.PROTECT,
+                                  related_name="change_requests")
+    changes = models.JSONField("تغییرات", default=dict)   # {field: {"old": ..., "new": ..., "label": ...}}
+    note = models.CharField("توضیح", max_length=255, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
+                                   on_delete=models.PROTECT, related_name="+")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    reject_reason = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = "درخواست ویرایش"
+        verbose_name_plural = "درخواست‌های ویرایش"
+        ordering = ["-id"]
+        constraints = [models.CheckConstraint(
+            condition=(models.Q(unit__isnull=False, item_type__isnull=True)
+                       | models.Q(unit__isnull=True, item_type__isnull=False)),
+            name="change_request_one_target")]
+
+    @property
+    def target(self):
+        return self.unit or self.item_type
+
+    def __str__(self):
+        return f"ویرایش #{self.pk}"
